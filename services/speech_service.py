@@ -4,6 +4,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Default Voice Map by Language
+DEFAULT_VOICES = {
+    "hi": "hi-IN-SwaraNeural",
+    "hi-IN": "hi-IN-SwaraNeural",
+    "pa": "pa-IN-OjasNeural",
+    "pa-IN": "pa-IN-OjasNeural",
+    "es": "es-ES-ElviraNeural",
+    "es-ES": "es-ES-ElviraNeural",
+    "en": "en-US-JennyNeural",
+    "en-US": "en-US-JennyNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+    "ja": "ja-JP-NanamiNeural",
+}
+
 
 class SpeechService:
     def __init__(self):
@@ -32,7 +47,6 @@ class SpeechService:
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """Captures spoken audio and transcribes it to text."""
         self.speech_config.speech_recognition_language = language
         audio_config = self._get_audio_config(audio_file_path)
 
@@ -70,14 +84,19 @@ class SpeechService:
     def text_to_speech(
         self,
         text: str,
-        voice_name: str = "en-US-JennyNeural",
+        voice_name: str | None = None,
+        language: str = "en-US",
         output_audio_path: str | None = None
     ) -> dict:
-        """Synthesizes text into spoken audio."""
+        """
+        Synthesizes text into spoken audio.
+        Automatically selects appropriate neural voice based on language if voice_name is omitted.
+        """
         if not text or not text.strip():
             raise ValueError("Text cannot be empty.")
 
-        self.speech_config.speech_synthesis_voice_name = voice_name
+        selected_voice = voice_name or DEFAULT_VOICES.get(language, DEFAULT_VOICES.get(language[:2], "en-US-JennyNeural"))
+        self.speech_config.speech_synthesis_voice_name = selected_voice
 
         if output_audio_path:
             audio_config = speechsdk.audio.AudioOutputConfig(filename=output_audio_path)
@@ -95,7 +114,7 @@ class SpeechService:
             return {
                 "success": True,
                 "text": text.strip(),
-                "voice_name": voice_name,
+                "voice_name": selected_voice,
                 "audio_path": output_audio_path,
                 "error": None
             }
@@ -104,11 +123,11 @@ class SpeechService:
             return {
                 "success": False,
                 "text": text.strip(),
-                "voice_name": voice_name,
+                "voice_name": selected_voice,
                 "audio_path": None,
                 "error": f"Synthesis canceled: {cancellation.reason}. Details: {cancellation.error_details}"
             }
-        return {"success": False, "text": text.strip(), "voice_name": voice_name, "audio_path": None, "error": "Unknown error."}
+        return {"success": False, "text": text.strip(), "voice_name": selected_voice, "audio_path": None, "error": "Unknown error."}
 
     def assess_pronunciation(
         self,
@@ -116,7 +135,6 @@ class SpeechService:
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """Evaluates speech against reference_text."""
         if not reference_text or not reference_text.strip():
             raise ValueError("Reference text cannot be empty.")
 
