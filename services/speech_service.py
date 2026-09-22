@@ -21,7 +21,6 @@ class SpeechService:
         )
 
     def _get_audio_config(self, audio_file_path: str | None = None) -> speechsdk.audio.AudioConfig:
-        """Helper to configure audio input from a file or default microphone."""
         if audio_file_path:
             if not os.path.exists(audio_file_path):
                 raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
@@ -33,7 +32,7 @@ class SpeechService:
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """Captures speech from mic or audio file and transcribes it to text."""
+        """Captures spoken audio and transcribes it to text."""
         self.speech_config.speech_recognition_language = language
         audio_config = self._get_audio_config(audio_file_path)
 
@@ -48,12 +47,14 @@ class SpeechService:
             return {
                 "success": True,
                 "text": result.text,
-                "language": language
+                "language": language,
+                "error": None
             }
         elif result.reason == speechsdk.ResultReason.NoMatch:
             return {
                 "success": False,
                 "text": "",
+                "language": language,
                 "error": "No speech recognized."
             }
         elif result.reason == speechsdk.ResultReason.Canceled:
@@ -61,9 +62,10 @@ class SpeechService:
             return {
                 "success": False,
                 "text": "",
+                "language": language,
                 "error": f"Recognition canceled: {cancellation.reason}. Details: {cancellation.error_details}"
             }
-        return {"success": False, "text": "", "error": "Unknown recognition error."}
+        return {"success": False, "text": "", "language": language, "error": "Unknown recognition error."}
 
     def text_to_speech(
         self,
@@ -71,10 +73,7 @@ class SpeechService:
         voice_name: str = "en-US-JennyNeural",
         output_audio_path: str | None = None
     ) -> dict:
-        """
-        Synthesizes text into spoken audio.
-        Outputs to default speakers or saves to output_audio_path (e.g. 'response.wav' or 'response.mp3').
-        """
+        """Synthesizes text into spoken audio."""
         if not text or not text.strip():
             raise ValueError("Text cannot be empty.")
 
@@ -97,15 +96,19 @@ class SpeechService:
                 "success": True,
                 "text": text.strip(),
                 "voice_name": voice_name,
-                "audio_path": output_audio_path
+                "audio_path": output_audio_path,
+                "error": None
             }
         elif result.reason == speechsdk.ResultReason.Canceled:
             cancellation = result.cancellation_details
             return {
                 "success": False,
-                "error": f"Speech synthesis canceled: {cancellation.reason}. Details: {cancellation.error_details}"
+                "text": text.strip(),
+                "voice_name": voice_name,
+                "audio_path": None,
+                "error": f"Synthesis canceled: {cancellation.reason}. Details: {cancellation.error_details}"
             }
-        return {"success": False, "error": "Unknown synthesis error."}
+        return {"success": False, "text": text.strip(), "voice_name": voice_name, "audio_path": None, "error": "Unknown error."}
 
     def assess_pronunciation(
         self,
@@ -113,7 +116,7 @@ class SpeechService:
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """Transcribes speech and evaluates pronunciation against reference_text."""
+        """Evaluates speech against reference_text."""
         if not reference_text or not reference_text.strip():
             raise ValueError("Reference text cannot be empty.")
 
@@ -148,12 +151,15 @@ class SpeechService:
                     "completeness_score": pron_result.completeness_score,
                     "pronunciation_score": pron_result.pronunciation_score,
                     "prosody_score": getattr(pron_result, "prosody_score", None)
-                }
+                },
+                "error": None
             }
         elif result.reason == speechsdk.ResultReason.NoMatch:
             return {
                 "success": False,
                 "recognized_text": "",
+                "reference_text": reference_text,
+                "scores": None,
                 "error": "No speech recognized for assessment."
             }
         elif result.reason == speechsdk.ResultReason.Canceled:
@@ -161,6 +167,8 @@ class SpeechService:
             return {
                 "success": False,
                 "recognized_text": "",
+                "reference_text": reference_text,
+                "scores": None,
                 "error": f"Assessment canceled: {cancellation.reason}. Details: {cancellation.error_details}"
             }
-        return {"success": False, "recognized_text": "", "error": "Unknown error."}
+        return {"success": False, "recognized_text": "", "reference_text": reference_text, "scores": None, "error": "Unknown error."}

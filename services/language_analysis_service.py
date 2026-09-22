@@ -9,7 +9,6 @@ load_dotenv()
 
 class LanguageAnalysisService:
     def __init__(self):
-        # 1. Initialize Azure AI Language Client
         lang_key = os.getenv("AZURE_LANGUAGE_KEY")
         lang_endpoint = os.getenv("AZURE_LANGUAGE_ENDPOINT")
 
@@ -21,7 +20,6 @@ class LanguageAnalysisService:
             credential=AzureKeyCredential(lang_key)
         )
 
-        # 2. Initialize Azure Translator Client
         trans_key = os.getenv("AZURE_TRANSLATOR_KEY")
         trans_endpoint = os.getenv("AZURE_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com/")
         trans_region = os.getenv("AZURE_TRANSLATOR_REGION")
@@ -40,9 +38,7 @@ class LanguageAnalysisService:
         text: str,
         target_gloss_language: str = "en"
     ) -> dict:
-        """
-        Extracts language, key phrases, and entities, and adds a translated gloss.
-        """
+        """Extracts language, key phrases, and entities, and adds a translated gloss."""
         if not text or not text.strip():
             raise ValueError("Text cannot be empty.")
 
@@ -105,13 +101,14 @@ class LanguageAnalysisService:
         except Exception as e:
             print(f"Gloss translation warning: {e}")
 
-        # Structured signal for LLM Tutor
         return {
+            "success": True,
             "original_text": cleaned_text,
             "detected_language": detected_lang,
             "language_confidence": confidence_score,
             "key_phrases": key_phrases,
             "entities": entities,
             "gloss_translation": gloss_translation,
-            "target_gloss_language": target_gloss_language
+            "target_gloss_language": target_gloss_language,
+            "error": None
         }
