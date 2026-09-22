@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-class SpeechInService:
+class SpeechService:
     def __init__(self):
         self.speech_key = os.getenv("AZURE_SPEECH_KEY")
         self.speech_region = os.getenv("AZURE_SPEECH_REGION")
@@ -33,9 +33,7 @@ class SpeechInService:
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """
-        Captures speech from mic or audio file and transcribes it to text.
-        """
+        """Captures speech from mic or audio file and transcribes it to text."""
         self.speech_config.speech_recognition_language = language
         audio_config = self._get_audio_config(audio_file_path)
 
@@ -67,15 +65,55 @@ class SpeechInService:
             }
         return {"success": False, "text": "", "error": "Unknown recognition error."}
 
+    def text_to_speech(
+        self,
+        text: str,
+        voice_name: str = "en-US-JennyNeural",
+        output_audio_path: str | None = None
+    ) -> dict:
+        """
+        Synthesizes text into spoken audio.
+        Outputs to default speakers or saves to output_audio_path (e.g. 'response.wav' or 'response.mp3').
+        """
+        if not text or not text.strip():
+            raise ValueError("Text cannot be empty.")
+
+        self.speech_config.speech_synthesis_voice_name = voice_name
+
+        if output_audio_path:
+            audio_config = speechsdk.audio.AudioOutputConfig(filename=output_audio_path)
+        else:
+            audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=True)
+
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=self.speech_config,
+            audio_config=audio_config
+        )
+
+        result = synthesizer.speak_text_async(text.strip()).get()
+
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            return {
+                "success": True,
+                "text": text.strip(),
+                "voice_name": voice_name,
+                "audio_path": output_audio_path
+            }
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation = result.cancellation_details
+            return {
+                "success": False,
+                "error": f"Speech synthesis canceled: {cancellation.reason}. Details: {cancellation.error_details}"
+            }
+        return {"success": False, "error": "Unknown synthesis error."}
+
     def assess_pronunciation(
         self,
         reference_text: str,
         language: str = "en-US",
         audio_file_path: str | None = None
     ) -> dict:
-        """
-        Transcribes speech and evaluates pronunciation against reference_text.
-        """
+        """Transcribes speech and evaluates pronunciation against reference_text."""
         if not reference_text or not reference_text.strip():
             raise ValueError("Reference text cannot be empty.")
 
