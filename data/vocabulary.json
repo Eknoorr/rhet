@@ -1,0 +1,74 @@
+
+[
+  {
+    "word": "happy",
+    "level": "A1",
+    "part_of_speech": "adjective",
+    "meaning": "feeling good or pleased",
+    "example": "I am happy today."
+  },
+  {
+    "word": "hungry",
+    "level": "A1",
+    "part_of_speech": "adjective",
+    "meaning": "needing or wanting food",
+    "example": "I am hungry after class."
+  },
+  {
+    "word": "beautiful",
+    "level": "A1",
+    "part_of_speech": "adjective",
+    "meaning": "very pleasing to look at",
+    "example": "The garden is beautiful."
+  },
+  {
+    "word": "improve",
+    "level": "A2",
+    "part_of_speech": "verb",
+    "meaning": "to become better or make something better",
+    "example": "I want to improve my English."
+  },
+  {
+    "word": "practice",
+    "level": "A2",
+    "part_of_speech": "verb",
+    "meaning": "to do something repeatedly to become better at it",
+    "example": "I practice speaking English every day."
+  },
+  {
+    "word": "confident",
+    "level": "A2",
+    "part_of_speech": "adjective",
+    "meaning": "feeling sure about your abilities",
+    "example": "She feels confident when speaking English."
+  },
+  {
+    "word": "communicate",
+    "level": "B1",
+    "part_of_speech": "verb",
+    "meaning": "to share information, ideas, or feelings with others",
+    "example": "English helps people communicate around the world."
+  },
+  {
+    "word": "accurate",
+    "level": "B1",
+    "part_of_speech": "adjective",
+    "meaning": "correct and free from mistakes",
+    "example": "The student gave an accurate answer."
+  },
+  {
+    "word": "opportunity",
+    "level": "B1",
+    "part_of_speech": "noun",
+    "meaning": "a good situation or chance to do something",
+    "example": "This course gives me an opportunity to practice."
+  },
+  {
+    "word": "fluency",
+    "level": "B2",
+    "part_of_speech": "noun",
+    "meaning": "the ability to speak or write smoothly and easily",
+    "example": "Regular conversation can improve fluency."
+  }
+]
+

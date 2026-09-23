@@ -1,0 +1,73 @@
+
+[
+  {
+    "id": "grammar_001",
+    "level": "A1",
+    "type": "grammar_correction",
+    "prompt": "Correct this sentence: Yesterday I go to school.",
+    "expected_answer": "Yesterday I went to school."
+  },
+  {
+    "id": "grammar_002",
+    "level": "A1",
+    "type": "grammar_correction",
+    "prompt": "Correct this sentence: She are happy.",
+    "expected_answer": "She is happy."
+  },
+  {
+    "id": "grammar_003",
+    "level": "A2",
+    "type": "grammar_correction",
+    "prompt": "Correct this sentence: He don't like coffee.",
+    "expected_answer": "He doesn't like coffee."
+  },
+  {
+    "id": "vocabulary_001",
+    "level": "A1",
+    "type": "vocabulary",
+    "prompt": "What does 'hungry' mean?",
+    "expected_answer": "Hungry means needing or wanting food."
+  },
+  {
+    "id": "vocabulary_002",
+    "level": "A2",
+    "type": "vocabulary",
+    "prompt": "Use the word 'improve' in a sentence.",
+    "expected_answer": "I want to improve my English."
+  },
+  {
+    "id": "conversation_001",
+    "level": "A1",
+    "type": "conversation",
+    "prompt": "Introduce yourself in three simple sentences.",
+    "expected_answer": "A simple introduction containing a name, background, or interest."
+  },
+  {
+    "id": "conversation_002",
+    "level": "A2",
+    "type": "conversation",
+    "prompt": "Tell me about your daily routine.",
+    "expected_answer": "A response describing common daily activities."
+  },
+  {
+    "id": "translation_001",
+    "level": "A1",
+    "type": "translation",
+    "prompt": "Translate 'I am hungry' into Spanish.",
+    "expected_answer": "Tengo hambre."
+  },
+  {
+    "id": "ambiguity_001",
+    "level": "B1",
+    "type": "vocabulary_context",
+    "prompt": "What does 'bank' mean?",
+    "expected_answer": "The assistant should explain that 'bank' can refer to a financial institution or the side of a river and ask for context if needed."
+  },
+  {
+    "id": "mixed_language_001",
+    "level": "A2",
+    "type": "mixed_language",
+    "prompt": "I went al mercado yesterday. Help me correct this sentence.",
+    "expected_answer": "I went to the market yesterday."
+  }
+]
