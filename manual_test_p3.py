@@ -54,7 +54,9 @@ def test_foundry_agent_unit():
     print(json.dumps(sample_signal, indent=2, ensure_ascii=False))
     
     print("\nSending structured signal to Foundry Agent...")
-    reply = agent.generate_tutor_turn(structured_signal=sample_signal, kb_context=sample_kb)
+    reply = agent.generate_tutor_turn(
+        structured_signal=sample_signal
+    )
     print("\n--- Agent Response ---")
     print(json.dumps(reply, indent=2, ensure_ascii=False))
 
