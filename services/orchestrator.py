@@ -11,26 +11,42 @@ class MasterOrchestrator:
         self.agent_client = FoundryAgentClient()
 
     def process_turn(self, turn_input: LearnerTurnInput) -> TutorTurnResponse:
-        # Step 1: Ingest via P4 Pipeline or raw text
-        if turn_input.audio_path or turn_input.target_sentence:
+        if turn_input.audio_path:
+
             p4_result = self.pipeline_p4.process_learner_audio(
                 reference_text=turn_input.target_sentence,
                 language=turn_input.target_language,
                 audio_file_path=turn_input.audio_path,
                 target_gloss_language=turn_input.target_gloss_language
             )
-        else:
+
+        elif turn_input.raw_text_input:
+
             p4_result = {
                 "success": True,
-                "raw_transcript": turn_input.raw_text_input or "",
+                "raw_transcript": turn_input.raw_text_input,
                 "pronunciation_scores": None,
                 "llm_ready_signal": {
-                    "transcript": turn_input.raw_text_input or "",
+                    "transcript": turn_input.raw_text_input,
                     "detected_language": turn_input.target_language,
                     "native_gloss": ""
                 }
             }
 
+        else:
+
+            return TutorTurnResponse(
+                success=False,
+                transcript="",
+                pronunciation_scores=None,
+                detected_language=turn_input.target_language,
+                native_gloss="",
+                kb_context_used=[],
+                feedback="No audio recording or text input was provided.",
+                next_prompt="",
+                tutor_audio_path=None,
+                error="No audio recording or text input was provided."
+            )
         transcript = p4_result.get("raw_transcript", "")
 
         # Step 2: Guardrails
@@ -60,12 +76,6 @@ class MasterOrchestrator:
         feedback_text = agent_output.get("pedagogical_feedback", "")
 
         # Step 4: TTS Speech Out
-        tts_result = self.pipeline_p4.speak_tutor_response(
-            text=reply_text,
-            language=turn_input.target_language,
-            output_audio_path="tutor_response.wav"
-        )
-        # Step 5: TTS Speech Out
         tts_result = self.pipeline_p4.speak_tutor_response(
             text=reply_text,
             language=turn_input.target_language,

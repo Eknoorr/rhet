@@ -24,19 +24,61 @@ class PipelineConnector:
         Runs speech-in transcription or pronunciation scoring, followed by
         language analysis, entity recognition, key-phrase extraction, and translation glossing.
         """
-        if reference_text:
+        # 1. Speech recognition + pronunciation assessment
+        if reference_text and audio_file_path:
+            # IMPORTANT:
+            # Both operations use the SAME recorded WAV.
+            
+            stt_res = self.speech_service.speech_to_text(
+                language=language,
+                audio_file_path=audio_file_path
+            )
+
+            pron_res = self.speech_service.assess_pronunciation(
+                reference_text=reference_text,
+                language=language,
+                audio_file_path=audio_file_path
+            )
+
+            raw_text = (
+                stt_res.get("text")
+                or pron_res.get("recognized_text")
+                or ""
+            )
+
+            pron_scores = pron_res.get("scores")
+
+            if not raw_text.strip():
+                return {
+                    "success": False,
+                    "error": (
+                        stt_res.get("error")
+                        or pron_res.get("error")
+                        or "No speech recognized."
+                    ),
+                    "raw_transcript": "",
+                    "pronunciation_scores": pron_scores,
+                    "language_analysis": None,
+                    "llm_ready_signal": None
+                }
+
+        elif reference_text:
+            # Fallback for your local CLI/manual testing.
             speech_res = self.speech_service.assess_pronunciation(
                 reference_text=reference_text,
                 language=language,
                 audio_file_path=audio_file_path
             )
+
             raw_text = speech_res.get("recognized_text") or ""
             pron_scores = speech_res.get("scores")
+
         else:
             speech_res = self.speech_service.speech_to_text(
                 language=language,
                 audio_file_path=audio_file_path
             )
+
             raw_text = speech_res.get("text") or ""
             pron_scores = None
 

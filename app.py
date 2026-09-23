@@ -13,19 +13,52 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("🎙️ Learner Input")
-    target_lang = st.selectbox("Select Target Language", ["es-ES", "zh-CN", "hi-IN", "fr-FR", "en-US"])
-    target_sentence = st.text_input("Target Sentence Prompt", value="Buenos días por favor")
-    
-    if st.button("🎤 Speak & Submit Turn"):
-        with st.spinner("Processing Voice & Assessment..."):
-            turn_input = LearnerTurnInput(
-                user_id="user_123",
-                target_language=target_lang,
-                target_sentence=target_sentence
-            )
-            response = orchestrator.process_turn(turn_input)
-            st.session_state["last_response"] = response
 
+    target_lang = st.selectbox(
+        "Select Target Language",
+        ["es-ES", "zh-CN", "hi-IN", "fr-FR", "en-US"]
+    )
+
+    target_sentence = st.text_input(
+        "Target Sentence Prompt",
+        value="Buenos días por favor"
+    )
+
+    # Browser microphone capture
+    audio_value = st.audio_input(
+        "🎙️ Record your voice",
+        sample_rate=16000
+    )
+
+    if audio_value and st.button("🎤 Process Voice"):
+        import os
+        import tempfile
+
+        # Save the browser recording as a temporary WAV file
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(temp_fd)
+
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(audio_value.getvalue())
+
+            with st.spinner("Processing Voice & Assessment..."):
+
+                turn_input = LearnerTurnInput(
+                    user_id="user_123",
+                    target_language=target_lang,
+                    target_sentence=target_sentence,
+                    audio_path=temp_path
+                )
+
+                response = orchestrator.process_turn(turn_input)
+
+                st.session_state["last_response"] = response
+
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
 with col2:
     st.subheader("🤖 AI Tutor Feedback & Response")
     if "last_response" in st.session_state:
