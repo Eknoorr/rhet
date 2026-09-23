@@ -1,5 +1,14 @@
-import streamlit as st
+import os
+import json
+import uuid
+from datetime import datetime
 
+import streamlit as st
+from streamlit_local_storage import LocalStorage
+
+from services.foundry_agent import FoundryAgentClient
+from services.orchestrator import MasterOrchestrator
+from models.p3_schemas import LearnerTurnInput
 # ============================================================
 # PAGE SETUP
 # ============================================================
@@ -13,21 +22,174 @@ st.set_page_config(
 
 # ============================================================
 # SESSION STATE
-# ============================================================
+# ==========================
+# ==================================
+
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = str(uuid.uuid4())
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "recent_lessons" not in st.session_state:
-    st.session_state.recent_lessons = [
-        {"flag": "🇪🇸", "title": "Spanish — Daily Conversation", "time": "Today"},
-        {"flag": "🇫🇷", "title": "French — Ordering at a Bistro", "time": "Yesterday"},
-        {"flag": "🇯🇵", "title": "Japanese — Travel Essentials", "time": "2d ago"},
-        {"flag": "🇩🇪", "title": "German — Workplace Greetings", "time": "4d ago"},
-        {"flag": "🇮🇹", "title": "Italian — Food & Dining", "time": "1w ago"},
-        {"flag": "🇬🇧", "title": "English — Pronunciation Practice", "time": "1w ago"},
-        {"flag": "🇧🇷", "title": "Portuguese — Rio Travel Basics", "time": "2w ago"},
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = MasterOrchestrator()
+
+if "next_target" not in st.session_state:
+    st.session_state.next_target = ""
+
+# ============================================================
+# LOCAL STORAGE
+# ============================================================
+
+local_storage = LocalStorage()
+
+HISTORY_KEY = "rhet_chat_history"
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "history_loaded" not in st.session_state:
+    saved_history = local_storage.getItem(HISTORY_KEY)
+
+    if saved_history:
+        try:
+            if isinstance(saved_history, str):
+                st.session_state.chat_history = json.loads(
+                    saved_history
+                )
+            elif isinstance(saved_history, list):
+                st.session_state.chat_history = saved_history
+        except (json.JSONDecodeError, TypeError):
+            st.session_state.chat_history = []
+
+    st.session_state.history_loaded = True
+
+if "foundry_agent" not in st.session_state:
+    st.session_state.foundry_agent = None
+
+def get_foundry_agent():
+    if st.session_state.foundry_agent is None:
+        st.session_state.foundry_agent = FoundryAgentClient()
+
+    return st.session_state.foundry_agent
+
+def save_history_to_local_storage():
+    """
+    Save the current conversation list to browser localStorage.
+    """
+    try:
+        local_storage.setItem(
+            HISTORY_KEY,
+            json.dumps(
+                st.session_state.chat_history,
+                ensure_ascii=False
+            )
+        )
+    except Exception as e:
+        st.warning(
+            f"Could not save conversation history: {e}"
+        )
+
+
+def get_history_title(messages):
+    """
+    Use the first meaningful user message as the conversation title.
+    """
+    for message in messages:
+        if message.get("role") == "user":
+            content = message.get("content", "")
+
+            if isinstance(content, str):
+                title = content.strip()
+
+                if title:
+                    return (
+                        title[:42] + "..."
+                        if len(title) > 42
+                        else title
+                    )
+
+    return "New conversation"
+
+
+def get_language_flag(language):
+    """
+    Convert target language into a small sidebar flag.
+    """
+    flags = {
+        "Spanish": "🇪🇸",
+        "English": "🇬🇧",
+        "French": "🇫🇷",
+        "German": "🇩🇪",
+        "Japanese": "🇯🇵",
+        "Hindi": "🇮🇳",
+    }
+
+    return flags.get(language, "🌐")
+
+
+def save_current_conversation():
+    """
+    Save the current chat as a history entry.
+    """
+
+    messages = st.session_state.messages
+
+    # Don't save empty conversations.
+    if not messages:
+        return
+
+    conversation_id = st.session_state.get(
+        "conversation_id"
+    )
+
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+        st.session_state.conversation_id = conversation_id
+
+    history_entry = {
+        "id": conversation_id,
+        "title": get_history_title(messages),
+        "flag": get_language_flag(
+            st.session_state.get(
+                "target_language",
+                "Spanish"
+            )
+        ),
+        "created_at": datetime.now().isoformat(),
+        "messages": messages,
+        "native_language": st.session_state.get(
+            "native_language",
+            "English"
+        ),
+        "target_language": st.session_state.get(
+            "target_language",
+            "Spanish"
+        ),
+        "level": st.session_state.get(
+            "proficiency_level",
+            "A1"
+        ),
+    }
+
+    history = st.session_state.chat_history
+
+    # Replace existing version of this conversation.
+    history = [
+        item
+        for item in history
+        if item.get("id") != conversation_id
     ]
+
+    # Put newest conversation first.
+    history.insert(0, history_entry)
+
+    # Keep localStorage small.
+    history = history[:20]
+
+    st.session_state.chat_history = history
+
+    save_history_to_local_storage()
 
 # ============================================================
 # FONTS & STYLESHEET (MINIMALISTIC, REFINED, CLEAN)
@@ -364,44 +526,6 @@ div.new-conv-btn [data-testid="stButton"] > button:hover {
    MINIMALISTIC CENTERED CHAT INPUT & MICROPHONE DOCK
    ========================================================= */
 
-/* Float microphone pill directly above centered chat input */
-.voice-dock-wrap {
-    display: flex;
-    justify-content: center;
-    margin-top: 20px;
-    margin-bottom: 12px;
-}
-
-.minimal-mic-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(15, 20, 30, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(12px);
-    border-radius: 30px;
-    padding: 7px 18px;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: #cbd5e1;
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.minimal-mic-pill:hover {
-    border-color: rgba(74, 222, 128, 0.4);
-    background: rgba(34, 197, 94, 0.08);
-    color: #ffffff;
-}
-
-.mic-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background-color: #22c55e;
-}
-
 /* CENTERED MINIMALISTIC CHAT INPUT */
 
 [data-testid="stChatInput"] {
@@ -415,7 +539,7 @@ div.new-conv-btn [data-testid="stButton"] > button:hover {
 [data-testid="stChatInput"] > div {
     border-radius: 30px !important;
     border: 1px solid rgba(255, 255, 255, 0.12) !important;
-    background: rgba(13, 17, 26, 0.94) !important;
+    background: rgba(15, 23, 42, 0.96) !important;
     backdrop-filter: blur(24px) !important;
     -webkit-backdrop-filter: blur(24px) !important;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 20px rgba(34, 197, 94, 0.08) !important;
@@ -463,6 +587,164 @@ div.new-conv-btn [data-testid="stButton"] > button:hover {
         max-width: 92% !important;
     }
 }
+/* =========================================================
+   HISTORY BUTTONS
+   ========================================================= */
+
+.history-button [data-testid="stButton"] > button {
+    width: 100%;
+    text-align: left !important;
+    padding: 10px 12px !important;
+    border-radius: 11px !important;
+    margin-bottom: 6px !important;
+    background: rgba(255, 255, 255, 0.02) !important;
+    border: 1px solid rgba(255, 255, 255, 0.04) !important;
+    color: #e2e8f0 !important;
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+}
+
+.history-button [data-testid="stButton"] > button:hover {
+    background: rgba(34, 197, 94, 0.07) !important;
+    border-color: rgba(74, 222, 128, 0.25) !important;
+}
+
+/* =========================================================
+   CHAT TEXT VISIBILITY FIX
+   ========================================================= */
+
+/* Main text inside every chat message */
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] div,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] span,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li {
+    color: #f1f5f9 !important;
+}
+
+/* Headings */
+[data-testid="stChatMessage"] h1,
+[data-testid="stChatMessage"] h2,
+[data-testid="stChatMessage"] h3,
+[data-testid="stChatMessage"] h4,
+[data-testid="stChatMessage"] h5,
+[data-testid="stChatMessage"] h6 {
+    color: #ffffff !important;
+}
+
+/* Strong / bold labels */
+[data-testid="stChatMessage"] strong,
+[data-testid="stChatMessage"] b {
+    color: #ffffff !important;
+}
+
+/* User message text */
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"])
+[data-testid="stMarkdownContainer"] {
+    color: #f8fafc !important;
+}
+
+/* Rhet main response */
+[data-testid="stChatMessage"] .rhet-response {
+    color: #f8fafc !important;
+    font-size: 15px;
+    line-height: 1.7;
+}
+
+/* Translation */
+[data-testid="stChatMessage"] .translation-text {
+    color: #cbd5e1 !important;
+    line-height: 1.6;
+}
+
+/* Tutor feedback */
+[data-testid="stChatMessage"] [data-testid="stAlert"] {
+    background: rgba(30, 41, 59, 0.85) !important;
+    border: 1px solid rgba(96, 165, 250, 0.18) !important;
+}
+
+[data-testid="stChatMessage"] [data-testid="stAlert"] p,
+[data-testid="stChatMessage"] [data-testid="stAlert"] div {
+    color: #dbeafe !important;
+}
+
+/* Captions such as "You said" */
+[data-testid="stChatMessage"] [data-testid="stCaptionContainer"],
+[data-testid="stChatMessage"] [data-testid="stCaptionContainer"] p {
+    color: #94a3b8 !important;
+}
+
+/* Metrics */
+[data-testid="stChatMessage"] [data-testid="stMetricLabel"] {
+    color: #94a3b8 !important;
+}
+
+[data-testid="stChatMessage"] [data-testid="stMetricValue"] {
+    color: #f8fafc !important;
+}
+
+/* Inline target sentence */
+[data-testid="stChatMessage"] code {
+    color: #166534 !important;
+    background: #f0fdf4 !important;
+    border: 1px solid rgba(74, 222, 128, 0.25) !important;
+    border-radius: 6px !important;
+    padding: 3px 7px !important;
+}
+
+/* Audio player spacing */
+[data-testid="stChatMessage"] audio {
+    width: 100% !important;
+}
+
+/* =========================================================
+   CHAT INPUT BUTTONS
+   ========================================================= */
+
+/* Mic + Send buttons inside the chat bar */
+[data-testid="stChatInput"] button {
+    background: #1f2937 !important;
+    color: #4ade80 !important;
+    border: 1px solid rgba(74, 222, 128, 0.18) !important;
+    border-radius: 12px !important;
+    width: 38px !important;
+    height: 38px !important;
+    transition: all 0.2s ease !important;
+}
+
+/* Hover */
+[data-testid="stChatInput"] button:hover {
+    background: #22c55e !important;
+    color: #06120a !important;
+    border-color: #4ade80 !important;
+    box-shadow: 0 0 16px rgba(34, 197, 94, 0.25) !important;
+    transform: translateY(-1px);
+}
+
+/* Pressed */
+[data-testid="stChatInput"] button:active {
+    background: #16a34a !important;
+    color: #ffffff !important;
+    transform: scale(0.95);
+}
+
+/* Disabled send button */
+[data-testid="stChatInput"] button:disabled {
+    background: rgba(31, 41, 55, 0.65) !important;
+    color: #475569 !important;
+    border-color: rgba(255, 255, 255, 0.05) !important;
+    box-shadow: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+}
+
+/* SVG icons */
+[data-testid="stChatInput"] button svg {
+    color: currentColor !important;
+    stroke: currentColor !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -476,22 +758,132 @@ with st.sidebar:
 
     # NEW CONVERSATION BUTTON
     st.markdown('<div class="new-conv-btn">', unsafe_allow_html=True)
-    if st.button("＋  New conversation", use_container_width=True):
+    if st.button(
+        "＋  New conversation",
+        use_container_width=True
+    ):
+
+        save_current_conversation()
+
         st.session_state.messages = []
+        st.session_state.orchestrator = MasterOrchestrator()
+        st.session_state.next_target = ""
+        st.session_state.conversation_id = str(uuid.uuid4())
+
         st.rerun()
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # RECENTS SECTION (EXPANDED TO FILL SPACE)
-    st.markdown('<div class="section-title">RECENT LESSONS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">LEARNER</div>', unsafe_allow_html=True)
 
-    for lesson in st.session_state.recent_lessons:
-        st.markdown(f"""<div class="recent-card">
-<span class="recent-flag">{lesson['flag']}</span>
-<div class="recent-details">
-<div class="recent-title">{lesson['title']}</div>
-<div class="recent-meta">{lesson['time']}</div>
-</div>
-</div>""", unsafe_allow_html=True)
+    native_language = st.selectbox(
+        "Native language",
+        ["English", "Hindi", "French", "Spanish", "German"],
+        index=0,
+        key="native_language"
+    )
+
+    target_language = st.selectbox(
+        "Learning",
+        ["Spanish", "English", "French", "German", "Japanese", "Hindi"],
+        index=0,
+        key="target_language"
+    )
+
+    proficiency_level = st.selectbox(
+        "Level",
+        ["A1", "A2", "B1", "B2", "C1", "C2"],
+        index=0,
+        key="proficiency_level"
+    )
+
+    # ============================================================
+    # RECENT CONVERSATIONS
+    # ============================================================
+
+    st.markdown(
+        '<div class="section-title">RECENT CONVERSATIONS</div>',
+        unsafe_allow_html=True
+    )
+
+    if not st.session_state.chat_history:
+
+        st.markdown(
+            """
+            <div class="recent-card">
+                <div class="recent-details">
+                    <div class="recent-title">
+                        No conversations yet
+                    </div>
+                    <div class="recent-meta">
+                        Start chatting to build your history
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    else:
+
+        for item in st.session_state.chat_history[:8]:
+
+            conversation_id = item.get(
+                "id",
+                str(uuid.uuid4())
+            )
+
+            title = item.get(
+                "title",
+                "Conversation"
+            )
+
+            flag = item.get(
+                "flag",
+                "🌐"
+            )
+
+            # ONE button per history item.
+            clicked = st.button(
+                f"{flag}  {title}",
+                key=f"history_{conversation_id}",
+                use_container_width=True
+            )
+
+            if clicked:
+
+                # Restore saved messages.
+                st.session_state.messages = item.get(
+                    "messages",
+                    []
+                )
+
+                # Restore learner settings.
+                st.session_state.native_language = item.get(
+                    "native_language",
+                    "English"
+                )
+
+                st.session_state.target_language = item.get(
+                    "target_language",
+                    "Spanish"
+                )
+
+                st.session_state.proficiency_level = item.get(
+                    "level",
+                    "A1"
+                )
+
+                # Reset the next pronunciation target.
+                st.session_state.next_target = ""
+
+                # Give this loaded conversation its own UI ID.
+                st.session_state.conversation_id = conversation_id
+
+                # Start a fresh backend conversation for now.
+                st.session_state.orchestrator = MasterOrchestrator()
+
+                st.rerun()
 
     # ACCOUNT SECTION
     st.markdown('<div class="account-section"></div>', unsafe_allow_html=True)
@@ -540,50 +932,401 @@ if len(st.session_state.messages) == 0:
 # ============================================================
 
 for message in st.session_state.messages:
+
     with st.chat_message(message["role"]):
-        st.write(message["content"])
 
-# MINIMALISTIC MICROPHONE DOCK (Voice Practice Trigger)
-st.markdown("""<div class="voice-dock-wrap">
-<div class="minimal-mic-pill">
-<span>🎙️</span>
-<span>Voice Practice Ready</span>
-<span class="mic-dot"></span>
-</div>
-</div>""", unsafe_allow_html=True)
+        if message["role"] == "user":
+            st.write(message["content"])
+            continue
 
-st.markdown('</div>', unsafe_allow_html=True)
+        result = message["content"]
+
+        reply = result.get(
+            "conversational_reply",
+            ""
+        )
+
+        if reply:
+            st.markdown(
+                f'<div class="rhet-response"><strong>🦜 Rhet</strong><br>{reply}</div>',
+                unsafe_allow_html=True
+            )
+
+        transcript = result.get(
+            "transcript",
+            ""
+        )
+
+        if transcript:
+            st.caption(
+                f"🎙️ You said: {transcript}"
+            )
+
+        scores = result.get(
+            "pronunciation_scores"
+        )
+
+        if scores:
+            st.markdown(
+                "**🗣️ Pronunciation**"
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.metric(
+                    "Pronunciation",
+                    f"{scores.get('pronunciation_score', 0):.1f}/100"
+                )
+
+            with col2:
+                st.metric(
+                    "Accuracy",
+                    f"{scores.get('accuracy_score', 0):.1f}/100"
+                )
+
+            st.caption(
+                f"Fluency: "
+                f"{scores.get('fluency_score', 0):.1f} • "
+                f"Completeness: "
+                f"{scores.get('completeness_score', 0):.1f}"
+            )
+
+        # Pronunciation guide
+        pronunciation = result.get(
+            "pronunciation",
+            ""
+        )
+
+        if pronunciation:
+            st.markdown(
+                f"**🔊 Pronunciation**\n\n{pronunciation}"
+            )
+
+        # Native-language translation
+        translation = result.get(
+            "translation",
+            ""
+        )
+
+        if translation:
+            st.markdown(
+                f"**🌐 Translation**\n\n{translation}"
+            )
+
+        feedback = result.get(
+            "pedagogical_feedback",
+            ""
+        )
+
+        if feedback:
+            st.info(
+                f"💡 {feedback}"
+            )
+
+        next_target = result.get(
+            "suggested_next_target",
+            ""
+        )
+
+        if next_target:
+            st.markdown(
+                f"**🎯 Try saying:** `{next_target}`"
+            )
+
+        audio_path = result.get(
+            "tutor_audio_path"
+        )
+
+        if (
+            audio_path
+            and os.path.exists(audio_path)
+        ):
+            st.audio(
+                audio_path,
+                format="audio/wav"
+            )
 
 # ============================================================
 # CENTERED MINIMALISTIC CHAT INPUT
 # ============================================================
 
-prompt = st.chat_input("Speak or message in any language... 🎙️")
+submission = st.chat_input(
+    "Speak or message in any language...",
+    key="chat_input",
+    accept_audio=True,
+    audio_sample_rate=16000,
+)
 
 # ============================================================
-# HANDLE MESSAGE
+# HANDLE TEXT + VOICE SUBMISSION
 # ============================================================
 
-if prompt:
-    st.session_state.messages.append({
-        "role": "user",
-        "content": prompt
-    })
+if submission is not None:
 
-    with st.chat_message("user"):
-        st.write(prompt)
+    # --------------------------------------------------------
+    # GET TEXT + AUDIO FROM THE SAME CHAT INPUT
+    # --------------------------------------------------------
 
-    # BACKEND RESPONSE HOOK
-    # Azure AI will be connected here later.
-    response = (
-        "I'm ready to help! 🦜\n\n"
-        "Your Azure AI response will be connected here."
+    text_input = (
+        submission.text.strip()
+        if submission.text
+        else ""
     )
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": response
-    })
+    audio_input = submission.audio
 
-    with st.chat_message("assistant"):
-        st.write(response)
+    # --------------------------------------------------------
+    # DO NOT ACCEPT TEXT + AUDIO IN THE SAME TURN
+    # --------------------------------------------------------
+
+    if text_input and audio_input is not None:
+
+        st.warning(
+            "Please use either text or voice for one turn."
+        )
+        st.stop()
+
+    # ========================================================
+    # TEXT MODE
+    # ========================================================
+
+    elif text_input:
+
+        # Store learner message
+        st.session_state.messages.append({
+            "role": "user",
+            "content": text_input
+        })
+
+        try:
+            agent = get_foundry_agent()
+
+            learner_signal = {
+                "transcript": text_input,
+                "detected_language": native_language,
+                "target_language": target_language,
+                "native_language": native_language,
+                "proficiency_level": proficiency_level,
+                "pronunciation_scores": None,
+                "language_analysis": {},
+            }
+
+            # Send text to Rhet
+            result = agent.generate_tutor_turn(
+                learner_signal
+            )
+
+            # Save Rhet's suggested sentence
+            # for the NEXT pronunciation turn.
+            st.session_state.next_target = (
+                result.get(
+                    "suggested_next_target",
+                    ""
+                ) or ""
+            )
+
+            save_current_conversation()
+
+        except Exception as e:
+
+            result = {
+                "conversational_reply":
+                    "Sorry, I couldn't process that message.",
+                "translation": "",
+                "pedagogical_feedback": "",
+                "explanation": "",
+                "suggested_next_target": "",
+                "error": str(e),
+            }
+
+        # Store structured Rhet response
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": result
+        })
+
+    # ========================================================
+    # VOICE MODE
+    # ========================================================
+
+    elif audio_input is not None:
+
+        import tempfile
+
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix=".wav"
+        )
+        os.close(temp_fd)
+
+        try:
+
+            # ------------------------------------------------
+            # SAVE THE BROWSER RECORDING
+            # ------------------------------------------------
+
+            with open(temp_path, "wb") as f:
+                f.write(audio_input.getvalue())
+
+            # ------------------------------------------------
+            # UI LANGUAGE → AZURE SPEECH LOCALE
+            # ------------------------------------------------
+
+            speech_language_codes = {
+                "Spanish": "es-ES",
+                "English": "en-US",
+                "French": "fr-FR",
+                "German": "de-DE",
+                "Japanese": "ja-JP",
+                "Hindi": "hi-IN",
+            }
+
+            speech_language = (
+                speech_language_codes.get(
+                    target_language,
+                    "en-US"
+                )
+            )
+
+            # ------------------------------------------------
+            # PREVIOUS RHET SUGGESTION = REFERENCE SENTENCE
+            # ------------------------------------------------
+
+            reference_text = (
+                st.session_state.next_target.strip()
+                if st.session_state.next_target
+                else None
+            )
+
+            # ------------------------------------------------
+            # BUILD THE EXISTING BACKEND INPUT
+            # ------------------------------------------------
+
+            turn_input = LearnerTurnInput(
+                user_id="user_123",
+                target_language=speech_language,
+                target_sentence=reference_text,
+                audio_path=temp_path,
+                target_gloss_language="en",
+            )
+
+            # ------------------------------------------------
+            # SEND THE SAME WAV TO YOUR EXISTING PIPELINE
+            # ------------------------------------------------
+
+            with st.spinner("Listening to you..."):
+
+                response = (
+                    st.session_state
+                    .orchestrator
+                    .process_turn(turn_input)
+                )
+
+            # ------------------------------------------------
+            # READ BACKEND RESPONSE
+            # ------------------------------------------------
+
+            transcript = getattr(
+                response,
+                "transcript",
+                ""
+            )
+
+            pronunciation_scores = getattr(
+                response,
+                "pronunciation_scores",
+                None
+            )
+
+            feedback = getattr(
+                response,
+                "feedback",
+                ""
+            )
+
+            native_gloss = getattr(
+                response,
+                "native_gloss",
+                ""
+            )
+
+            next_prompt = getattr(
+                response,
+                "next_prompt",
+                ""
+            )
+
+            tutor_audio_path = getattr(
+                response,
+                "tutor_audio_path",
+                None
+            )
+
+            # ------------------------------------------------
+            # STORE LEARNER'S SPOKEN MESSAGE
+            # ------------------------------------------------
+
+            if transcript:
+
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": f"🎙️ {transcript}"
+                })
+
+            # ------------------------------------------------
+            # STORE STRUCTURED RHET RESPONSE
+            # ------------------------------------------------
+
+            assistant_result = {
+                "transcript": transcript,
+
+                "pronunciation_scores":
+                    pronunciation_scores,
+
+                "pedagogical_feedback":
+                    feedback,
+
+                "translation":
+                    native_gloss,
+
+                "conversational_reply":
+                    next_prompt,
+
+                "suggested_next_target":
+                    next_prompt,
+
+                "tutor_audio_path":
+                    tutor_audio_path,
+            }
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": assistant_result
+            })
+
+            # ------------------------------------------------
+            # NEW TARGET FOR NEXT VOICE TURN
+            # ------------------------------------------------
+
+            st.session_state.next_target = (
+                next_prompt or ""
+            )
+
+            save_current_conversation()
+
+        except Exception as e:
+
+            st.error(
+                f"Voice processing failed: {e}"
+            )
+
+        finally:
+
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    # --------------------------------------------------------
+    # RE-RENDER CHAT ONCE
+    # --------------------------------------------------------
+
+    st.rerun()
