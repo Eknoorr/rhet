@@ -191,6 +191,53 @@ def save_current_conversation():
 
     save_history_to_local_storage()
 
+def generate_pronunciation_audio(text, language):
+    """
+    Generate playable pronunciation audio using Azure Speech TTS.
+    """
+
+    if not text or not text.strip():
+        return None
+
+    # Convert language name to Azure Speech locale.
+    speech_language_codes = {
+        "Spanish": "es-ES",
+        "English": "en-US",
+        "French": "fr-FR",
+        "German": "de-DE",
+        "Japanese": "ja-JP",
+        "Hindi": "hi-IN",
+    }
+
+    speech_language = speech_language_codes.get(
+        language,
+        "en-US"
+    )
+
+    import tempfile
+
+    temp_fd, temp_path = tempfile.mkstemp(
+        suffix=".wav"
+    )
+    os.close(temp_fd)
+
+    try:
+        st.session_state.orchestrator.pipeline_p4.speak_tutor_response(
+            text=text.strip(),
+            language=speech_language,
+            output_audio_path=temp_path,
+        )
+
+        if os.path.exists(temp_path):
+            return temp_path
+
+    except Exception as e:
+        st.warning(
+            f"Could not generate pronunciation audio: {e}"
+        )
+
+    return None
+
 # ============================================================
 # FONTS & STYLESHEET (MINIMALISTIC, REFINED, CLEAN)
 # ============================================================
@@ -208,16 +255,20 @@ st.markdown("""
    ========================================================= */
 
 html, body, [data-testid="stAppViewContainer"] {
-    background-color: #080b11;
-    background-image: 
-        radial-gradient(at 0% 0%, rgba(34, 197, 94, 0.05) 0px, transparent 45%),
-        radial-gradient(at 100% 100%, rgba(56, 189, 248, 0.04) 0px, transparent 45%);
+    width: 100%;
+    min-height: 100vh;
+    box-sizing: border-box;
+    background-color: #000000;
     color: #f1f5f9;
     font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
 [data-testid="stHeader"] {
     background: transparent;
+}
+
+[data-testid="stBottomBlockContainer"] {
+    background-color: #000000 !important;
 }
 
 #MainMenu, footer {
@@ -1003,6 +1054,19 @@ for message in st.session_state.messages:
                 f"**🔊 Pronunciation**\n\n{pronunciation}"
             )
 
+        pronunciation_audio_path = result.get(
+            "pronunciation_audio_path"
+        )
+
+        if (
+            pronunciation_audio_path
+            and os.path.exists(pronunciation_audio_path)
+        ):
+            st.audio(
+                pronunciation_audio_path,
+                format="audio/wav"
+            )
+
         # Native-language translation
         translation = result.get(
             "translation",
@@ -1014,6 +1078,7 @@ for message in st.session_state.messages:
                 f"**🌐 Translation**\n\n{translation}"
             )
 
+        # Teaching feedback
         feedback = result.get(
             "pedagogical_feedback",
             ""
@@ -1024,26 +1089,27 @@ for message in st.session_state.messages:
                 f"💡 {feedback}"
             )
 
+        # Practice target
         next_target = result.get(
             "suggested_next_target",
             ""
-        )
+        ) or ""
 
         if next_target:
             st.markdown(
                 f"**🎯 Try saying:** `{next_target}`"
             )
 
-        audio_path = result.get(
-            "tutor_audio_path"
+        target_audio_path = result.get(
+            "target_audio_path"
         )
 
         if (
-            audio_path
-            and os.path.exists(audio_path)
+            target_audio_path
+            and os.path.exists(target_audio_path)
         ):
             st.audio(
-                audio_path,
+                target_audio_path,
                 format="audio/wav"
             )
 
@@ -1117,14 +1183,59 @@ if submission is not None:
                 learner_signal
             )
 
-            # Save Rhet's suggested sentence
-            # for the NEXT pronunciation turn.
+            # Save the next pronunciation exercise.
             st.session_state.next_target = (
                 result.get(
                     "suggested_next_target",
                     ""
                 ) or ""
             )
+
+            next_target = result.get(
+                "suggested_next_target",
+                ""
+            ) or ""
+
+            target_audio = generate_pronunciation_audio(
+                next_target,
+                target_language
+            )
+
+            result["target_audio_path"] = target_audio
+
+            # ------------------------------------------------
+            # GENERATE PLAYABLE PRONUNCIATION AUDIO
+            # FOR RHET'S TARGET-LANGUAGE RESPONSE
+            # ------------------------------------------------
+
+            target_text = result.get(
+                "conversational_reply",
+                ""
+            )
+
+            speech_language_codes = {
+                "Spanish": "es-ES",
+                "English": "en-US",
+                "French": "fr-FR",
+                "German": "de-DE",
+                "Japanese": "ja-JP",
+                "Hindi": "hi-IN",
+            }
+
+            speech_language = speech_language_codes.get(
+                target_language,
+                "en-US"
+            )
+
+            pronunciation_audio = generate_pronunciation_audio(
+                target_text,
+                target_language
+            )
+
+            result["pronunciation_audio_path"] = (
+                pronunciation_audio
+            )
+
 
             save_current_conversation()
 
