@@ -37,6 +37,9 @@ if "orchestrator" not in st.session_state:
 if "next_target" not in st.session_state:
     st.session_state.next_target = ""
 
+if "pending_history_restore" not in st.session_state:
+    st.session_state.pending_history_restore = None
+
 # ============================================================
 # LOCAL STORAGE
 # ============================================================
@@ -114,8 +117,10 @@ def get_history_title(messages):
 
 def get_language_flag(language):
     """
-    Convert target language into a small sidebar flag.
+    Convert language name or language code into a flag.
+    Supports both old and new history entries.
     """
+
     flags = {
         "Spanish": "🇪🇸",
         "English": "🇬🇧",
@@ -123,10 +128,34 @@ def get_language_flag(language):
         "German": "🇩🇪",
         "Japanese": "🇯🇵",
         "Hindi": "🇮🇳",
+
+        # Old/localized language codes
+        "es": "🇪🇸",
+        "es-ES": "🇪🇸",
+
+        "en": "🇬🇧",
+        "en-US": "🇬🇧",
+
+        "fr": "🇫🇷",
+        "fr-FR": "🇫🇷",
+
+        "de": "🇩🇪",
+        "de-DE": "🇩🇪",
+
+        "ja": "🇯🇵",
+        "ja-JP": "🇯🇵",
+
+        "hi": "🇮🇳",
+        "hi-IN": "🇮🇳",
     }
 
-    return flags.get(language, "🌐")
+    if not language:
+        return "🌐"
 
+    return flags.get(
+        str(language).strip(),
+        "🌐"
+    )
 
 def save_current_conversation():
     """
@@ -139,9 +168,7 @@ def save_current_conversation():
     if not messages:
         return
 
-    conversation_id = st.session_state.get(
-        "conversation_id"
-    )
+    conversation_id = st.session_state.get("conversation_id")
 
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
@@ -157,7 +184,12 @@ def save_current_conversation():
             )
         ),
         "created_at": datetime.now().isoformat(),
-        "messages": messages,
+
+        # IMPORTANT: store a copy of the complete chat
+        "messages": json.loads(
+            json.dumps(messages)
+        ),
+
         "native_language": st.session_state.get(
             "native_language",
             "English"
@@ -181,16 +213,15 @@ def save_current_conversation():
         if item.get("id") != conversation_id
     ]
 
-    # Put newest conversation first.
+    # Newest first.
     history.insert(0, history_entry)
 
-    # Keep localStorage small.
+    # Keep maximum 20 conversations.
     history = history[:20]
 
     st.session_state.chat_history = history
 
     save_history_to_local_storage()
-
 def generate_pronunciation_audio(text, language):
     """
     Generate playable pronunciation audio using Azure Speech TTS.
@@ -800,6 +831,54 @@ div.new-conv-btn [data-testid="stButton"] > button:hover {
 """, unsafe_allow_html=True)
 
 # ============================================================
+# RESTORE PENDING HISTORY
+# MUST HAPPEN BEFORE SIDEBAR WIDGETS
+# ============================================================
+
+if st.session_state.pending_history_restore is not None:
+
+    item = st.session_state.pending_history_restore
+
+    # Restore complete chat
+    st.session_state.messages = json.loads(
+        json.dumps(
+            item.get("messages", [])
+        )
+    )
+
+    # Restore conversation ID
+    st.session_state.conversation_id = item.get(
+        "id",
+        str(uuid.uuid4())
+    )
+
+    # Restore learner settings BEFORE widgets exist
+    st.session_state.native_language = item.get(
+        "native_language",
+        "English"
+    )
+
+    st.session_state.target_language = item.get(
+        "target_language",
+        "Spanish"
+    )
+
+    st.session_state.proficiency_level = item.get(
+        "level",
+        "A1"
+    )
+
+    # Reset temporary target
+    st.session_state.next_target = ""
+
+    # Fresh orchestrator
+    st.session_state.orchestrator = MasterOrchestrator()
+
+    # Consume the pending restore
+    st.session_state.pending_history_restore = None
+
+
+# ============================================================
 # SIDEBAR (NO HOME BUTTON, FILLED WITH RECENTS)
 # ============================================================
 
@@ -889,53 +968,24 @@ with st.sidebar:
                 "Conversation"
             )
 
-            flag = item.get(
-                "flag",
-                "🌐"
-            )
-
-            # ONE button per history item.
-            clicked = st.button(
-                f"{flag}  {title}",
-                key=f"history_{conversation_id}",
-                use_container_width=True
-            )
-
-            if clicked:
-
-                # Restore saved messages.
-                st.session_state.messages = item.get(
-                    "messages",
-                    []
-                )
-
-                # Restore learner settings.
-                st.session_state.native_language = item.get(
-                    "native_language",
-                    "English"
-                )
-
-                st.session_state.target_language = item.get(
+            # Always derive flag from target language
+            flag = get_language_flag(
+                item.get(
                     "target_language",
                     "Spanish"
                 )
+            )
 
-                st.session_state.proficiency_level = item.get(
-                    "level",
-                    "A1"
-                )
+            if st.button(
+                f"{flag}  {title}",
+                key=f"history_{conversation_id}",
+                use_container_width=True
+            ):
 
-                # Reset the next pronunciation target.
-                st.session_state.next_target = ""
-
-                # Give this loaded conversation its own UI ID.
-                st.session_state.conversation_id = conversation_id
-
-                # Start a fresh backend conversation for now.
-                st.session_state.orchestrator = MasterOrchestrator()
-
+                st.session_state.pending_history_restore = item
                 st.rerun()
 
+                    
     # ACCOUNT SECTION
     st.markdown('<div class="account-section"></div>', unsafe_allow_html=True)
     st.markdown('<div class="section-title">ACCOUNT</div>', unsafe_allow_html=True)
@@ -1178,12 +1228,10 @@ if submission is not None:
                 "language_analysis": {},
             }
 
-            # Send text to Rhet
             result = agent.generate_tutor_turn(
                 learner_signal
             )
 
-            # Save the next pronunciation exercise.
             st.session_state.next_target = (
                 result.get(
                     "suggested_next_target",
@@ -1203,28 +1251,9 @@ if submission is not None:
 
             result["target_audio_path"] = target_audio
 
-            # ------------------------------------------------
-            # GENERATE PLAYABLE PRONUNCIATION AUDIO
-            # FOR RHET'S TARGET-LANGUAGE RESPONSE
-            # ------------------------------------------------
-
             target_text = result.get(
                 "conversational_reply",
                 ""
-            )
-
-            speech_language_codes = {
-                "Spanish": "es-ES",
-                "English": "en-US",
-                "French": "fr-FR",
-                "German": "de-DE",
-                "Japanese": "ja-JP",
-                "Hindi": "hi-IN",
-            }
-
-            speech_language = speech_language_codes.get(
-                target_language,
-                "en-US"
             )
 
             pronunciation_audio = generate_pronunciation_audio(
@@ -1236,12 +1265,18 @@ if submission is not None:
                 pronunciation_audio
             )
 
+            # Store complete Rhet response
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": result
+            })
 
+            # Save AFTER assistant response
             save_current_conversation()
 
         except Exception as e:
 
-            result = {
+            error_result = {
                 "conversational_reply":
                     "Sorry, I couldn't process that message.",
                 "translation": "",
@@ -1251,11 +1286,12 @@ if submission is not None:
                 "error": str(e),
             }
 
-        # Store structured Rhet response
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": result
-        })
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": error_result
+            })
+
+            save_current_conversation()
 
     # ========================================================
     # VOICE MODE
