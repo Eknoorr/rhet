@@ -11,6 +11,7 @@ from streamlit_local_storage import LocalStorage
 from services.foundry_agent import FoundryAgentClient
 from services.orchestrator import MasterOrchestrator
 from models.p3_schemas import LearnerTurnInput
+from services.cosmos_service import CosmosService
 # ============================================================
 # PAGE SETUP
 # ============================================================
@@ -50,6 +51,15 @@ if "navigation_loading" not in st.session_state:
 
 if "chat_request_pending" not in st.session_state:
     st.session_state.chat_request_pending = False
+
+if "cosmos" not in st.session_state:
+    st.session_state.cosmos = CosmosService()
+
+if "progress_session_counted" not in st.session_state:
+    st.session_state.progress_session_counted = False
+
+if "user_progress" not in st.session_state:
+    st.session_state.user_progress = None
 
 
 def navigate_to(page, pending_history=None):
@@ -236,9 +246,164 @@ def get_language_flag(language):
         "🌐"
     )
 
+def load_user_progress():
+    """Load the current user's progress from Cosmos DB."""
+    user_account = st.session_state.get("user_account") or {}
+    user_id = user_account.get("user_id")
+
+    if not user_id:
+        return None
+
+    try:
+        progress = st.session_state.cosmos.get_progress(user_id)
+
+        if progress:
+            st.session_state.user_progress = progress
+
+        return progress
+
+    except Exception as e:
+        st.warning(f"Could not load progress: {e}")
+        return None
+
+def update_user_progress():
+    """
+    Update the persistent learning progress for the current user.
+
+    A session is counted only once per conversation.
+    Messages are counted from the current conversation.
+    """
+
+    user_account = st.session_state.get("user_account") or {}
+    user_id = user_account.get("user_id")
+
+    if not user_id:
+        return
+
+    messages = st.session_state.get("messages", [])
+
+    if not messages:
+        return
+
+    try:
+        # --------------------------------------------------------
+        # Get existing progress
+        # --------------------------------------------------------
+        progress = st.session_state.cosmos.get_progress(user_id)
+
+        if not progress:
+            progress = {
+                "id": f"progress_{user_id}",
+                "user_id": user_id,
+                "total_sessions": 0,
+                "total_messages": 0,
+                "languages_practiced": [],
+                "last_practice_date": None,
+                "current_streak": 0,
+                "longest_streak": 0
+            }
+
+        # --------------------------------------------------------
+        # Count user messages
+        # --------------------------------------------------------
+        user_messages = [
+            message
+            for message in messages
+            if message.get("role") == "user"
+        ]
+
+        progress["total_messages"] = len(user_messages)
+
+        # --------------------------------------------------------
+        # Count this conversation as ONE session
+        # --------------------------------------------------------
+        if not st.session_state.progress_session_counted:
+            progress["total_sessions"] = (
+                progress.get("total_sessions", 0) + 1
+            )
+
+            st.session_state.progress_session_counted = True
+
+        # --------------------------------------------------------
+        # Track language
+        # --------------------------------------------------------
+        target_language = st.session_state.get(
+            "target_language",
+            "Spanish"
+        )
+
+        languages = progress.get(
+            "languages_practiced",
+            []
+        )
+
+        if target_language and target_language not in languages:
+            languages.append(target_language)
+
+        progress["languages_practiced"] = languages
+
+        # --------------------------------------------------------
+        # Practice date
+        # --------------------------------------------------------
+        today = datetime.now().date().isoformat()
+
+        last_practice = progress.get("last_practice_date")
+
+        if last_practice != today:
+            progress["last_practice_date"] = today
+
+        # --------------------------------------------------------
+        # Save to Cosmos
+        # --------------------------------------------------------
+        st.session_state.cosmos.save_progress(progress)
+
+    except Exception as e:
+        st.warning(
+            f"Progress could not be saved to Cosmos DB: {e}"
+        )
+
+def load_user_conversations():
+    """Load the current user's conversations from Cosmos DB."""
+
+    user_account = st.session_state.get("user_account") or {}
+    user_id = user_account.get("user_id")
+
+    if not user_id:
+        return []
+
+    try:
+        conversations = (
+            st.session_state.cosmos
+            .get_user_conversations(user_id)
+        )
+
+        conversations = list(conversations or [])
+
+        # Newest first
+        conversations.sort(
+            key=lambda item: item.get("updated_at", ""),
+            reverse=True
+        )
+
+        # Keep the same UI limit
+        conversations = conversations[:20]
+
+        st.session_state.chat_history = conversations
+
+        return conversations
+
+    except Exception as e:
+        st.warning(
+            f"Could not load conversations from Cosmos DB: {e}"
+        )
+        return []
+
 def save_current_conversation():
     """
-    Save the current chat as a history entry.
+    Save the current chat to:
+    1. Streamlit session state
+    2. Cosmos DB
+    3. Browser localStorage as a temporary fallback
     """
 
     messages = st.session_state.messages
@@ -247,24 +412,41 @@ def save_current_conversation():
     if not messages:
         return
 
+    user_account = st.session_state.get("user_account") or {}
+    user_id = user_account.get("user_id")
+
+    # We need a stable user ID before writing to Cosmos.
+    if not user_id:
+        st.warning(
+            "No user ID found. Conversation could not be saved to Cosmos DB."
+        )
+        return
+
     conversation_id = st.session_state.get("conversation_id")
 
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
         st.session_state.conversation_id = conversation_id
 
+    now = datetime.now().isoformat()
+
     history_entry = {
         "id": conversation_id,
+        "user_id": user_id,
+
         "title": get_history_title(messages),
+
         "flag": get_language_flag(
             st.session_state.get(
                 "target_language",
                 "Spanish"
             )
         ),
-        "created_at": datetime.now().isoformat(),
 
-        # IMPORTANT: store a copy of the complete chat
+        "created_at": now,
+        "updated_at": now,
+
+        # Store a copy of the complete chat.
         "messages": json.loads(
             json.dumps(messages)
         ),
@@ -273,15 +455,21 @@ def save_current_conversation():
             "native_language",
             "English"
         ),
+
         "target_language": st.session_state.get(
             "target_language",
             "Spanish"
         ),
+
         "level": st.session_state.get(
             "proficiency_level",
             "A1"
         ),
     }
+
+    # ========================================================
+    # UPDATE LOCAL SESSION STATE
+    # ========================================================
 
     history = st.session_state.chat_history
 
@@ -295,12 +483,38 @@ def save_current_conversation():
     # Newest first.
     history.insert(0, history_entry)
 
-    # Keep maximum 20 conversations.
+    # Keep maximum 20 conversations in the UI.
     history = history[:20]
 
     st.session_state.chat_history = history
 
+    # ========================================================
+    # SAVE TO COSMOS DB
+    # ========================================================
+
+    try:
+        st.session_state.cosmos.save_conversation(
+            history_entry
+        )
+
+    except Exception as e:
+        st.warning(
+            f"Conversation saved locally, but Cosmos DB save failed: {e}"
+        )
+
+    # ========================================================
+    # UPDATE LEARNING PROGRESS
+    # ========================================================
+
+    update_user_progress()
+
+    # ========================================================
+    # TEMPORARY LOCALSTORAGE FALLBACK
+    # ========================================================
+
     save_history_to_local_storage()
+
+
 def generate_pronunciation_audio(text, language):
     """
     Generate playable pronunciation audio using Azure Speech TTS.
@@ -401,18 +615,23 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
 
     if "history_loaded" not in st.session_state:
         saved_history = parsed_storage.get(HISTORY_KEY)
+
         if saved_history:
             try:
                 if isinstance(saved_history, str):
                     loaded_history = json.loads(saved_history)
+
                     if isinstance(loaded_history, list):
                         st.session_state.chat_history = loaded_history
+
                 elif isinstance(saved_history, list):
                     st.session_state.chat_history = saved_history
+
             except (json.JSONDecodeError, TypeError):
                 st.session_state.chat_history = []
-        st.session_state.history_loaded = True
 
+        st.session_state.history_loaded = True
+        
     if "account_loaded" not in st.session_state:
         saved_account = parsed_storage.get(ACCOUNT_KEY)
         parsed_account = None
@@ -432,6 +651,24 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
         )
 
         stored_account = st.session_state.account_storage_record
+        if stored_account and not stored_account.get("user_id"):
+            stored_account["user_id"] = (
+                stored_account.get("id")
+                or str(uuid.uuid4())
+            )
+
+            st.session_state.account_storage_record = stored_account
+
+            try:
+                local_storage.setItem(
+                    ACCOUNT_KEY,
+                    json.dumps(
+                        stored_account,
+                        ensure_ascii=False
+                    )
+                )
+            except Exception:
+                pass
         if stored_account:
             # Accounts created before the sign-in flow did not have an
             # authenticated flag; treat those as signed in for compatibility.
@@ -439,6 +676,107 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
             st.session_state.user_account = stored_account if authenticated else None
 
         st.session_state.account_loaded = True
+
+    # ============================================================
+    # LOAD PERSISTENT COSMOS DATA FOR SIGNED-IN USER
+    # ============================================================
+
+    if (
+        st.session_state.get("user_account")
+        and "cosmos_user_data_loaded" not in st.session_state
+    ):
+
+        user_id = (
+            st.session_state.user_account
+            .get("user_id")
+        )
+
+        if user_id:
+
+            # ----------------------------------------------------
+            # LOAD USER PROFILE + SETTINGS
+            # ----------------------------------------------------
+
+            try:
+                cosmos_user = (
+                    st.session_state.cosmos
+                    .get_user(user_id)
+                )
+
+                if cosmos_user:
+
+                    # Update account information
+                    st.session_state.user_account.update({
+                        "user_id": cosmos_user.get(
+                            "user_id",
+                            user_id
+                        ),
+                        "name": cosmos_user.get(
+                            "name",
+                            st.session_state.user_account.get(
+                                "name",
+                                ""
+                            )
+                        ),
+                        "email": cosmos_user.get(
+                            "email",
+                            st.session_state.user_account.get(
+                                "email",
+                                ""
+                            )
+                        )
+                    })
+
+                    # Load learning settings
+                    for key in (
+                        "native_language",
+                        "target_language",
+                        "proficiency_level",
+                        "daily_goal",
+                        "session_length",
+                        "correction_style",
+                        "show_translations",
+                        "pronunciation_feedback",
+                        "auto_play_audio",
+                    ):
+                        if key in cosmos_user:
+                            st.session_state[key] = (
+                                cosmos_user[key]
+                            )
+
+            except Exception as e:
+                st.warning(
+                    f"Could not load user profile from Cosmos DB: {e}"
+                )
+
+            # ----------------------------------------------------
+            # LOAD CONVERSATIONS
+            # ----------------------------------------------------
+
+            load_user_conversations()
+
+            # ----------------------------------------------------
+            # LOAD PROGRESS
+            # ----------------------------------------------------
+
+            try:
+                progress = (
+                    st.session_state.cosmos
+                    .get_progress(user_id)
+                )
+
+                st.session_state.user_progress = (
+                    progress
+                    if progress
+                    else None
+                )
+
+            except Exception as e:
+                st.warning(
+                    f"Could not load progress from Cosmos DB: {e}"
+                )
+
+        st.session_state.cosmos_user_data_loaded = True
 
     if "settings_loaded" not in st.session_state:
         saved_settings = parsed_storage.get(SETTINGS_KEY)
@@ -458,28 +796,93 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
                 pass
         st.session_state.settings_loaded = True
 
-
 def save_user_account(account):
     """Save the local account and persist signed-in state in one localStorage item."""
     record = dict(account)
+
+    # Give every account one stable ID.
+    if not record.get("user_id"):
+        record["user_id"] = record.get("id") or str(uuid.uuid4())
+
     record["authenticated"] = True
     st.session_state.user_account = record
     st.session_state.account_storage_record = record
+
+    # ========================================================
+    # SAVE USER PROFILE TO COSMOS
+    # ========================================================
+
     try:
-        # Keep account + authentication state in ONE item. This avoids the
-        # duplicate component-key issue caused by multiple setItem calls.
+        user_document = {
+            "id": record["user_id"],
+            "user_id": record["user_id"],
+            "name": record.get("name", ""),
+            "email": record.get("email", ""),
+            "created_at": record.get(
+                "created_at",
+                datetime.now().isoformat()
+            ),
+
+            "native_language": st.session_state.get(
+                "native_language",
+                "English"
+            ),
+            "target_language": st.session_state.get(
+                "target_language",
+                "Spanish"
+            ),
+            "proficiency_level": st.session_state.get(
+                "proficiency_level",
+                "A1"
+            ),
+            "daily_goal": st.session_state.get(
+                "daily_goal",
+                10
+            ),
+            "session_length": st.session_state.get(
+                "session_length",
+                "10 minutes"
+            ),
+            "correction_style": st.session_state.get(
+                "correction_style",
+                "Balanced"
+            ),
+            "show_translations": st.session_state.get(
+                "show_translations",
+                True
+            ),
+            "pronunciation_feedback": st.session_state.get(
+                "pronunciation_feedback",
+                True
+            ),
+            "auto_play_audio": st.session_state.get(
+                "auto_play_audio",
+                True
+            )
+        }
+
+        st.session_state.cosmos.save_user(user_document)
+
+    except Exception as e:
+        st.warning(
+            f"Account created locally, but Cosmos user save failed: {e}"
+        )
+
+    # ========================================================
+    # SAVE LOCAL ACCOUNT
+    # ========================================================
+
+    try:
         local_storage.setItem(
             ACCOUNT_KEY,
             json.dumps(record, ensure_ascii=False)
         )
-        # Give the browser component a moment to commit the localStorage write
-        # before Streamlit navigates to a different page / session state.
         time.sleep(0.45)
         return True
+
     except Exception as e:
         st.warning(f"Could not save account information: {e}")
         return False
-
 
 def sign_in_user(email):
     """Authenticate against the single locally stored demo account."""
@@ -1748,6 +2151,7 @@ if st.session_state.pending_history_restore is not None:
         "id",
         str(uuid.uuid4())
     )
+    st.session_state.progress_session_counted = True
 
     # Restore learner settings BEFORE widgets exist
     st.session_state.native_language = item.get(
@@ -1819,10 +2223,15 @@ with st.sidebar:
             navigate_to("signup")
         else:
             save_current_conversation()
+
             st.session_state.messages = []
             st.session_state.orchestrator = MasterOrchestrator()
             st.session_state.next_target = ""
             st.session_state.conversation_id = str(uuid.uuid4())
+
+            # New conversation = allow one new progress session count
+            st.session_state.progress_session_counted = False
+
             navigate_to("chat")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1935,10 +2344,21 @@ if st.session_state.page == "home":
     tl = st.session_state.get("target_language", "Spanish")
     lvl = st.session_state.get("proficiency_level", "A1")
     flag = get_language_flag(tl)
-    total_sessions = len(st.session_state.chat_history)
-    langs_tried = len(set(
-        item.get("target_language", "") for item in st.session_state.chat_history
-    )) or 1
+    progress = load_user_progress() or {}
+
+    total_sessions = progress.get(
+        "total_sessions",
+        0
+    )
+
+    langs_tried = len(
+        progress.get("languages_practiced", [])
+    ) or 1
+
+    current_streak = progress.get(
+        "current_streak",
+        0
+    )
 
     # Olive hero band
     st.markdown(f"""
@@ -1970,7 +2390,9 @@ if st.session_state.page == "home":
         <div class="stat-label">Current Level</div>
       </div>
       <div class="stat-card accent">
-        <div class="stat-value" style="font-size:20px;letter-spacing:0">streak</div>
+        <div class="stat-value" style="font-size:20px;letter-spacing:0">
+            {current_streak}
+        </div>
         <div class="stat-label">Keep It Up</div>
       </div>
     </div>
