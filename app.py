@@ -1,6 +1,7 @@
 ﻿import os
 import json
 import uuid
+import time
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -42,7 +43,7 @@ if "pending_history_restore" not in st.session_state:
     st.session_state.pending_history_restore = None
 
 if "page" not in st.session_state:
-    st.session_state.page = "home"  # "home" | "chat" | "settings" | "profile" | "signup"
+    st.session_state.page = "home"  # "home" | "chat" | "settings" | "profile" | "signup" | "signin"
 
 if "navigation_loading" not in st.session_state:
     st.session_state.navigation_loading = False
@@ -144,22 +145,6 @@ HISTORY_KEY = "rhet_chat_history"
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
-if "history_loaded" not in st.session_state:
-    saved_history = local_storage.getItem(HISTORY_KEY)
-
-    if saved_history:
-        try:
-            if isinstance(saved_history, str):
-                st.session_state.chat_history = json.loads(
-                    saved_history
-                )
-            elif isinstance(saved_history, list):
-                st.session_state.chat_history = saved_history
-        except (json.JSONDecodeError, TypeError):
-            st.session_state.chat_history = []
-
-    st.session_state.history_loaded = True
 
 if "foundry_agent" not in st.session_state:
     st.session_state.foundry_agent = None
@@ -373,77 +358,182 @@ SETTINGS_KEY = "rhet_user_settings"
 if "user_account" not in st.session_state:
     st.session_state.user_account = None
 
-if "account_loaded" not in st.session_state:
-    saved_account = local_storage.getItem(ACCOUNT_KEY)
-    if saved_account:
-        try:
-            if isinstance(saved_account, str):
-                st.session_state.user_account = json.loads(saved_account)
-            elif isinstance(saved_account, dict):
-                st.session_state.user_account = saved_account
-        except (json.JSONDecodeError, TypeError):
-            st.session_state.user_account = None
-    st.session_state.account_loaded = True
+if "account_storage_record" not in st.session_state:
+    st.session_state.account_storage_record = None
 
-if "settings_loaded" not in st.session_state:
-    saved_settings = local_storage.getItem(SETTINGS_KEY)
-    if saved_settings:
+# LocalStorage's getItem component can need a second render before it
+# exposes an existing browser value. Retry exactly once so a refresh does
+# not incorrectly send an existing user to Sign up.
+if "account_loaded" not in st.session_state or "settings_loaded" not in st.session_state or "history_loaded" not in st.session_state:
+    # Read browser localStorage once per Streamlit session. Multiple getItem()
+    # components in the same render can collide on the frontend component key.
+    saved_storage = None
+    try:
+        saved_storage = local_storage.getAll()
+    except Exception:
+        saved_storage = None
+
+    parsed_storage = {}
+
+    if isinstance(saved_storage, dict):
+        parsed_storage = saved_storage
+    elif isinstance(saved_storage, str):
         try:
-            if isinstance(saved_settings, str):
-                saved_settings = json.loads(saved_settings)
-            if isinstance(saved_settings, dict):
-                for key in (
-                    "native_language", "target_language", "proficiency_level",
-                    "daily_goal", "session_length", "correction_style",
-                    "show_translations", "pronunciation_feedback", "auto_play_audio"
-                ):
-                    if key in saved_settings:
-                        st.session_state[key] = saved_settings[key]
+            loaded = json.loads(saved_storage)
+            if isinstance(loaded, dict):
+                parsed_storage = loaded
         except (json.JSONDecodeError, TypeError):
-            pass
-    st.session_state.settings_loaded = True
+            parsed_storage = {}
+    elif isinstance(saved_storage, list):
+        for item in saved_storage:
+            if isinstance(item, dict):
+                item_key = item.get("key")
+                if item_key and "value" in item:
+                    parsed_storage[item_key] = item.get("value")
+                elif item_key and "toStore" in item:
+                    parsed_storage[item_key] = item.get("toStore")
+
+    # getAll() can be empty/None on its first browser render. Retry once so an
+    # existing local account is not mistaken for a new user.
+    if saved_storage is None and not st.session_state.get("storage_load_retried", False):
+        st.session_state.storage_load_retried = True
+        st.rerun()
+
+    if "history_loaded" not in st.session_state:
+        saved_history = parsed_storage.get(HISTORY_KEY)
+        if saved_history:
+            try:
+                if isinstance(saved_history, str):
+                    loaded_history = json.loads(saved_history)
+                    if isinstance(loaded_history, list):
+                        st.session_state.chat_history = loaded_history
+                elif isinstance(saved_history, list):
+                    st.session_state.chat_history = saved_history
+            except (json.JSONDecodeError, TypeError):
+                st.session_state.chat_history = []
+        st.session_state.history_loaded = True
+
+    if "account_loaded" not in st.session_state:
+        saved_account = parsed_storage.get(ACCOUNT_KEY)
+        parsed_account = None
+        if saved_account:
+            try:
+                if isinstance(saved_account, str):
+                    parsed_account = json.loads(saved_account)
+                elif isinstance(saved_account, dict):
+                    parsed_account = saved_account
+            except (json.JSONDecodeError, TypeError):
+                parsed_account = None
+
+        st.session_state.account_storage_record = (
+            parsed_account
+            if isinstance(parsed_account, dict) and parsed_account.get("email")
+            else None
+        )
+
+        stored_account = st.session_state.account_storage_record
+        if stored_account:
+            # Accounts created before the sign-in flow did not have an
+            # authenticated flag; treat those as signed in for compatibility.
+            authenticated = stored_account.get("authenticated", True)
+            st.session_state.user_account = stored_account if authenticated else None
+
+        st.session_state.account_loaded = True
+
+    if "settings_loaded" not in st.session_state:
+        saved_settings = parsed_storage.get(SETTINGS_KEY)
+        if saved_settings:
+            try:
+                if isinstance(saved_settings, str):
+                    saved_settings = json.loads(saved_settings)
+                if isinstance(saved_settings, dict):
+                    for key in (
+                        "native_language", "target_language", "proficiency_level",
+                        "daily_goal", "session_length", "correction_style",
+                        "show_translations", "pronunciation_feedback", "auto_play_audio"
+                    ):
+                        if key in saved_settings:
+                            st.session_state[key] = saved_settings[key]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        st.session_state.settings_loaded = True
 
 
 def save_user_account(account):
-    """Save signup/profile information to browser localStorage."""
-    st.session_state.user_account = account
+    """Save the local account and persist signed-in state in one localStorage item."""
+    record = dict(account)
+    record["authenticated"] = True
+    st.session_state.user_account = record
+    st.session_state.account_storage_record = record
     try:
-        local_storage.setItem(ACCOUNT_KEY, json.dumps(account, ensure_ascii=False))
+        # Keep account + authentication state in ONE item. This avoids the
+        # duplicate component-key issue caused by multiple setItem calls.
+        local_storage.setItem(
+            ACCOUNT_KEY,
+            json.dumps(record, ensure_ascii=False)
+        )
+        # Give the browser component a moment to commit the localStorage write
+        # before Streamlit navigates to a different page / session state.
+        time.sleep(0.45)
         return True
     except Exception as e:
         st.warning(f"Could not save account information: {e}")
         return False
 
 
-def save_user_settings():
-    """Save learner preferences to browser localStorage."""
-    settings = {
-        "native_language": st.session_state.get("native_language", "English"),
-        "target_language": st.session_state.get("target_language", "Spanish"),
-        "proficiency_level": st.session_state.get("proficiency_level", "A1"),
-        "daily_goal": st.session_state.get("daily_goal", 10),
-        "session_length": st.session_state.get("session_length", "10 minutes"),
-        "correction_style": st.session_state.get("correction_style", "Balanced"),
-        "show_translations": st.session_state.get("show_translations", True),
-        "pronunciation_feedback": st.session_state.get("pronunciation_feedback", True),
-        "auto_play_audio": st.session_state.get("auto_play_audio", True),
-    }
+def sign_in_user(email):
+    """Authenticate against the single locally stored demo account."""
+    stored = st.session_state.get("account_storage_record") or {}
+    stored_email = str(stored.get("email", "")).strip().lower()
+
+    if not stored_email:
+        return False, "No local account exists in this browser yet. Please create an account first."
+
+    if email.strip().lower() != stored_email:
+        return False, "That email does not match the local account saved in this browser."
+
+    record = dict(stored)
+    record["authenticated"] = True
+
     try:
-        local_storage.setItem(SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
-        return True
+        local_storage.setItem(
+            ACCOUNT_KEY,
+            json.dumps(record, ensure_ascii=False)
+        )
+        time.sleep(0.45)
     except Exception as e:
-        st.warning(f"Could not save settings: {e}")
-        return False
+        return False, f"Could not save sign-in state: {e}"
+
+    st.session_state.account_storage_record = record
+    st.session_state.user_account = record
+    return True, ""
+
+
+def sign_out_user():
+    """Sign out without deleting the locally stored account."""
+    stored = st.session_state.get("account_storage_record") or {}
+    if stored:
+        record = dict(stored)
+        record["authenticated"] = False
+        try:
+            local_storage.setItem(
+                ACCOUNT_KEY,
+                json.dumps(record, ensure_ascii=False)
+            )
+            time.sleep(0.3)
+            st.session_state.account_storage_record = record
+        except Exception as e:
+            st.warning(f"Could not save sign-out state: {e}")
+    st.session_state.user_account = None
 
 
 def clear_user_account():
-    """Remove the local-only account and return the app to signup state."""
+    """Delete the locally stored account completely."""
     st.session_state.user_account = None
+    st.session_state.account_storage_record = None
     try:
         local_storage.removeItem(ACCOUNT_KEY)
     except Exception:
-        # Some LocalStorage versions expose setItem/getItem only.
-        # Overwriting with an empty object keeps this fallback local-only.
         try:
             local_storage.setItem(ACCOUNT_KEY, json.dumps({}))
         except Exception as e:
@@ -1396,6 +1486,39 @@ div.nb [data-testid="stButton"] > button:hover {
     bottom: 18px !important;
     padding: 0 !important;
 }
+
+/* Keep the chat/search bar fixed to the viewport on desktop.
+   Streamlit can otherwise let the widget move with the scrollable main body. */
+@media (min-width: 681px) {
+    [data-testid="stBottom"] {
+        position: fixed !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100% !important;
+        z-index: 10000 !important;
+        pointer-events: none !important;
+        background: transparent !important;
+    }
+
+    [data-testid="stBottom"] [data-testid="stChatInput"] {
+        position: fixed !important;
+        left: calc(50% + 168px) !important;
+        transform: translateX(-50%) !important;
+        bottom: 18px !important;
+        width: min(640px, calc(100vw - 380px)) !important;
+        max-width: 640px !important;
+        margin: 0 !important;
+        z-index: 10001 !important;
+        pointer-events: auto !important;
+    }
+
+    /* Keep enough scroll clearance so the fixed input never obscures the
+       final chat message. */
+    [data-testid="stMainBlockContainer"] {
+        padding-bottom: 110px !important;
+    }
+}
 [data-testid="stChatInput"] > div {
     border-radius: var(--radius-lg) !important;
     border: 1.5px solid var(--border-hi) !important;
@@ -1656,7 +1779,9 @@ if st.session_state.pending_history_restore is not None:
 # AUTHENTICATION GATE — CHAT REQUIRES A LOCAL ACCOUNT
 # ============================================================
 if st.session_state.page == "chat" and not st.session_state.user_account:
-    st.session_state.page = "signup"
+    st.session_state.page = (
+        "signin" if st.session_state.get("account_storage_record") else "signup"
+    )
 
 # ============================================================
 # SIDEBAR (EXISTING FRONTEND + FUNCTIONAL ACCOUNT NAVIGATION)
@@ -1758,9 +1883,17 @@ with st.sidebar:
             navigate_to("profile")
             st.rerun()
     else:
-        if st.button("Sign up", use_container_width=True, key="account_signup"):
-            navigate_to("signup")
-            st.rerun()
+        if st.session_state.get("account_storage_record"):
+            if st.button("Sign in", use_container_width=True, key="account_signin"):
+                navigate_to("signin")
+                st.rerun()
+            if st.button("Sign up", use_container_width=True, key="account_signup"):
+                navigate_to("signup")
+                st.rerun()
+        else:
+            if st.button("Sign up", use_container_width=True, key="account_signup"):
+                navigate_to("signup")
+                st.rerun()
 
     if st.button("Settings", use_container_width=True, key="account_settings"):
         navigate_to("settings")
@@ -1776,6 +1909,7 @@ _page_labels = {
     "settings": "Settings",
     "profile": "Profile",
     "signup": "Sign up",
+    "signin": "Sign in",
 }
 _page_label = _page_labels.get(st.session_state.page, "Dashboard")
 st.markdown(f"""
@@ -1958,6 +2092,62 @@ elif st.session_state.page == "settings":
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+elif st.session_state.page == "signin":
+
+    # ── SIGN IN PAGE ───────────────────────────────────────────────────
+    st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="dash-section-title">Welcome back</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        """<div class="olive-band">
+          <div class="olive-band-text">
+            <div class="olive-band-title">Sign back in to parrhet.ai.</div>
+            <div class="olive-band-sub">Your local account is stored in this browser. Sign in with the same email you used when creating it.</div>
+          </div>
+          <div class="olive-band-lang">🦜</div>
+        </div>""",
+        unsafe_allow_html=True
+    )
+
+    with st.form("signin_form", clear_on_submit=False):
+        signin_email = st.text_input(
+            "Email",
+            value="",
+            placeholder="you@example.com"
+        )
+        signin_submit = st.form_submit_button(
+            "Sign in",
+            use_container_width=True
+        )
+
+    if signin_submit:
+        clean_email = signin_email.strip()
+        if not clean_email or "@" not in clean_email:
+            st.error("Please enter the email used for this local account.")
+        else:
+            ok, message = sign_in_user(clean_email)
+            if ok:
+                navigate_to("home")
+                st.rerun()
+            else:
+                st.error(message)
+
+    if st.session_state.get("account_storage_record"):
+        if st.button("Create a different local account", use_container_width=True, key="signin_signup"):
+            clear_user_account()
+            navigate_to("signup")
+            st.rerun()
+    else:
+        if st.button("Create account", use_container_width=True, key="signin_create"):
+            navigate_to("signup")
+            st.rerun()
+
+    if st.button("Back to home", use_container_width=True, key="signin_home"):
+        navigate_to("home")
+        st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
 elif st.session_state.page == "signup":
 
     # ── SIGNUP PAGE ─────────────────────────────────────────────────────
@@ -2001,6 +2191,12 @@ elif st.session_state.page == "signup":
                 navigate_to("profile")
                 st.rerun()
 
+    if st.session_state.get("account_storage_record"):
+        st.info("A local account already exists in this browser. Sign in instead, or create a different local account from the Sign in page.")
+        if st.button("Go to sign in", use_container_width=True, key="signup_to_signin"):
+            navigate_to("signin")
+            st.rerun()
+
     if st.button("Back to home", use_container_width=True, key="signup_home"):
         navigate_to("home")
         st.rerun()
@@ -2035,7 +2231,7 @@ elif st.session_state.page == "profile":
     st.markdown("**Learning preferences:** Configure your native language, learning language, level, and practice preferences in Settings.")
 
     if st.button("Sign out", use_container_width=True, key="profile_signout"):
-        clear_user_account()
+        sign_out_user()
         navigate_to("home")
         st.rerun()
 
