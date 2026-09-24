@@ -1,6 +1,7 @@
 ﻿import os
 import json
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 
 import streamlit as st
@@ -39,6 +40,99 @@ if "next_target" not in st.session_state:
 
 if "pending_history_restore" not in st.session_state:
     st.session_state.pending_history_restore = None
+
+if "page" not in st.session_state:
+    st.session_state.page = "home"  # "home" | "chat" | "settings" | "profile" | "signup"
+
+if "navigation_loading" not in st.session_state:
+    st.session_state.navigation_loading = False
+
+if "chat_request_pending" not in st.session_state:
+    st.session_state.chat_request_pending = False
+
+
+def navigate_to(page, pending_history=None):
+    """Switch pages through the app's visual page-transition loader."""
+    if pending_history is not None:
+        st.session_state.pending_history_restore = pending_history
+    st.session_state.page = page
+    st.session_state.navigation_loading = True
+
+
+def mark_chat_submission():
+    """Prevent the page-transition overlay from appearing for chat submissions."""
+    st.session_state.chat_request_pending = True
+    st.session_state.navigation_loading = False
+
+
+@contextmanager
+def processing_loader(title, subtitle="Just a moment…"):
+    """Show a compact in-chat loader while a chat request is running."""
+    holder = st.empty()
+    holder.markdown(
+        f"""
+        <div class="chat-processing-loader" aria-live="polite">
+          <div class="chat-processing-card">
+            <div class="chat-processing-spinner"></div>
+            <div class="chat-processing-copy">
+              <div class="chat-processing-title">{title}</div>
+              <div class="chat-processing-sub">{subtitle}</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        yield
+    finally:
+        holder.empty()
+
+
+def normalize_result_language_fields(result):
+    """Give each Rhet response explicit learning/native text fields for the UI."""
+    if not isinstance(result, dict):
+        return result
+
+    learning_text = (
+        result.get("learning_language_text")
+        or result.get("conversational_reply")
+        or result.get("suggested_next_target")
+        or ""
+    )
+    native_text = (
+        result.get("native_language_text")
+        or result.get("translation")
+        or result.get("native_gloss")
+        or ""
+    )
+
+    result["learning_language_text"] = str(learning_text or "").strip()
+    result["native_language_text"] = str(native_text or "").strip()
+    return result
+
+
+def ensure_target_audio(result, language):
+    """Regenerate missing practice-target audio when a saved session is reopened."""
+    if not isinstance(result, dict):
+        return None
+
+    target = (
+        result.get("suggested_next_target")
+        or result.get("learning_language_text")
+        or ""
+    ).strip()
+    if not target:
+        return None
+
+    current_path = result.get("target_audio_path")
+    if current_path and os.path.exists(current_path):
+        return current_path
+
+    path = generate_pronunciation_audio(target, language)
+    if path:
+        result["target_audio_path"] = path
+    return path
 
 # ============================================================
 # LOCAL STORAGE
@@ -270,565 +364,1245 @@ def generate_pronunciation_audio(text, language):
     return None
 
 # ============================================================
-# FONTS & STYLESHEET (MINIMALISTIC, REFINED, CLEAN)
+# ACCOUNT / SETTINGS STORAGE — ADDITIVE FUNCTIONALITY
+# ============================================================
+
+ACCOUNT_KEY = "rhet_user_account"
+SETTINGS_KEY = "rhet_user_settings"
+
+if "user_account" not in st.session_state:
+    st.session_state.user_account = None
+
+if "account_loaded" not in st.session_state:
+    saved_account = local_storage.getItem(ACCOUNT_KEY)
+    if saved_account:
+        try:
+            if isinstance(saved_account, str):
+                st.session_state.user_account = json.loads(saved_account)
+            elif isinstance(saved_account, dict):
+                st.session_state.user_account = saved_account
+        except (json.JSONDecodeError, TypeError):
+            st.session_state.user_account = None
+    st.session_state.account_loaded = True
+
+if "settings_loaded" not in st.session_state:
+    saved_settings = local_storage.getItem(SETTINGS_KEY)
+    if saved_settings:
+        try:
+            if isinstance(saved_settings, str):
+                saved_settings = json.loads(saved_settings)
+            if isinstance(saved_settings, dict):
+                for key in (
+                    "native_language", "target_language", "proficiency_level",
+                    "daily_goal", "session_length", "correction_style",
+                    "show_translations", "pronunciation_feedback", "auto_play_audio"
+                ):
+                    if key in saved_settings:
+                        st.session_state[key] = saved_settings[key]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    st.session_state.settings_loaded = True
+
+
+def save_user_account(account):
+    """Save signup/profile information to browser localStorage."""
+    st.session_state.user_account = account
+    try:
+        local_storage.setItem(ACCOUNT_KEY, json.dumps(account, ensure_ascii=False))
+        return True
+    except Exception as e:
+        st.warning(f"Could not save account information: {e}")
+        return False
+
+
+def save_user_settings():
+    """Save learner preferences to browser localStorage."""
+    settings = {
+        "native_language": st.session_state.get("native_language", "English"),
+        "target_language": st.session_state.get("target_language", "Spanish"),
+        "proficiency_level": st.session_state.get("proficiency_level", "A1"),
+        "daily_goal": st.session_state.get("daily_goal", 10),
+        "session_length": st.session_state.get("session_length", "10 minutes"),
+        "correction_style": st.session_state.get("correction_style", "Balanced"),
+        "show_translations": st.session_state.get("show_translations", True),
+        "pronunciation_feedback": st.session_state.get("pronunciation_feedback", True),
+        "auto_play_audio": st.session_state.get("auto_play_audio", True),
+    }
+    try:
+        local_storage.setItem(SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
+        return True
+    except Exception as e:
+        st.warning(f"Could not save settings: {e}")
+        return False
+
+
+def clear_user_account():
+    """Remove the local-only account and return the app to signup state."""
+    st.session_state.user_account = None
+    try:
+        local_storage.removeItem(ACCOUNT_KEY)
+    except Exception:
+        # Some LocalStorage versions expose setItem/getItem only.
+        # Overwriting with an empty object keeps this fallback local-only.
+        try:
+            local_storage.setItem(ACCOUNT_KEY, json.dumps({}))
+        except Exception as e:
+            st.warning(f"Could not clear account information: {e}")
+
+
+def get_user_display_name():
+    account = st.session_state.get("user_account") or {}
+    return account.get("name") or "Learner"
+
+
+def get_user_email():
+    account = st.session_state.get("user_account") or {}
+    return account.get("email") or ""
+
+# ============================================================
+# FONTS & STYLESHEET — CREAM + OLIVE EDITORIAL
 # ============================================================
 
 st.markdown("""
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <style>
 /* =========================================================
-   GLOBAL RESET & DARK OBSIDIAN CANVAS
+   DESIGN TOKENS — WARM CREAM + OLIVE
    ========================================================= */
 
-html, body, [data-testid="stAppViewContainer"] {
-    width: 100%;
-    min-height: 100vh;
-    box-sizing: border-box;
-    background-color: #000000;
-    color: #f1f5f9;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+:root {
+    --bg:          #EDE6D6;
+    --bg-sidebar:  #E2DAC9;
+    --surface:     #FDFAF5;
+    --surface-2:   #F5F0E8;
+    --border:      rgba(90,80,55,0.18);
+    --border-hi:   rgba(90,80,55,0.36);
+    --olive:       #6B7A46;
+    --olive-hi:    #4A5920;
+    --olive-lo:    #8A9A62;
+    --olive-pale:  #C8D4A8;
+    --olive-card:  #7B8C52;
+    --coral:       #C45030;
+    --coral-pale:  #F2C5B0;
+    --text:        #1A1710;
+    --text-muted:  #7A7260;
+    --radius:      10px;
+    --radius-lg:   14px;
+    /* Instrument Serif for display, Inter for UI */
+    --font-display: 'Instrument Serif', Georgia, serif;
+    --font:         'Inter', system-ui, sans-serif;
+    --mono:         'JetBrains Mono', 'Courier New', monospace;
+    --ease:         cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-[data-testid="stHeader"] {
-    background: transparent;
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, [data-testid="stAppViewContainer"] {
+    background-color: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: var(--font) !important;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased !important;
+    text-rendering: optimizeLegibility !important;
+}
+
+[data-testid="stHeader"],
+[data-testid="stDecoration"],
+#MainMenu, footer {
+    display: none !important;
+    visibility: hidden !important;
 }
 
 [data-testid="stBottomBlockContainer"] {
-    background-color: #000000 !important;
-}
-
-#MainMenu, footer {
-    visibility: hidden;
+    background: var(--bg) !important;
+    border-top: 1px solid var(--border) !important;
 }
 
 .block-container {
-    padding-top: 0rem;
-    padding-bottom: 7rem;
-    max-width: 100%;
+    padding-top: 0 !important;
+    padding-bottom: 7.5rem !important;
+    max-width: 100% !important;
 }
 
 /* =========================================================
-   SIDEBAR (REFINED GLASS WITH RICH RECENTS)
+   SIDEBAR
    ========================================================= */
 
 [data-testid="stSidebar"] {
-    background-color: #0b0f17 !important;
-    border-right: 1px solid rgba(255, 255, 255, 0.06) !important;
+    background: var(--bg-sidebar) !important;
+    border-right: 1.5px solid var(--border) !important;
 }
-
 [data-testid="stSidebar"] > div:first-child {
-    padding: 28px 18px;
+    padding: 24px 14px 24px;
 }
 
-/* SIDEBAR LOGO */
+/* Logo */
+.sb-logo {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 400;
+    font-style: italic;
+    background: linear-gradient(135deg, var(--text) 0%, var(--olive-hi) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.4px;
+    margin-bottom: 20px;
+    line-height: 1;
+}
+.sb-logo-accent {
+    background: linear-gradient(135deg, var(--coral) 0%, #E07040 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-style: normal;
+    font-weight: 500;
+}
 
-.sidebar-logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 24px;
+/* Section labels */
+.sb-label {
+    font-family: var(--font);
+    font-size: 9px;
     font-weight: 700;
-    color: #ffffff;
-    margin-bottom: 22px;
-    letter-spacing: -0.5px;
-}
-
-.sidebar-logo .mint {
-    color: #4ade80;
-}
-
-/* NEW CONVERSATION BUTTON */
-
-div.new-conv-btn [data-testid="stButton"] > button {
-    background: linear-gradient(135deg, #22c55e 0%, #10b981 100%) !important;
-    color: #04070a !important;
-    border: none !important;
-    border-radius: 12px !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-    font-size: 14.5px !important;
-    font-weight: 700 !important;
-    min-height: 44px !important;
-    box-shadow: 0 4px 18px rgba(34, 197, 94, 0.3) !important;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
-}
-
-div.new-conv-btn [data-testid="stButton"] > button:hover {
-    background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%) !important;
-    transform: translateY(-2px) !important;
-    box-shadow: 0 6px 24px rgba(74, 222, 128, 0.45) !important;
-}
-
-/* SECTION TITLES */
-
-.section-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
-    color: #64748b;
-    margin-top: 26px;
-    margin-bottom: 12px;
+    letter-spacing: 1.8px;
     text-transform: uppercase;
+    color: var(--text-muted);
+    margin: 20px 0 7px;
+    padding-left: 1px;
+    opacity: 0.65;
 }
 
-/* RICH RECENTS LIST */
-
-.recent-card {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    padding: 10px 12px;
-    border-radius: 11px;
-    margin-bottom: 6px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    cursor: pointer;
+/* History card (empty state) */
+.sb-card {
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.3);
+    margin-bottom: 4px;
 }
-
-.recent-card:hover {
-    background: rgba(34, 197, 94, 0.07);
-    border-color: rgba(74, 222, 128, 0.25);
-    transform: translateX(3px);
-}
-
-.recent-flag {
-    font-size: 18px;
-    flex-shrink: 0;
-}
-
-.recent-details {
-    overflow: hidden;
-}
-
-.recent-title {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 13px;
-    font-weight: 600;
-    color: #e2e8f0;
+.sb-card-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    line-height: 1.25;
 }
-
-.recent-meta {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 11px;
-    font-weight: 500;
-    color: #64748b;
+.sb-card-meta {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    opacity: 0.65;
     margin-top: 2px;
 }
 
-/* ACCOUNT BUTTONS */
-
-.account-section {
-    margin-top: 26px;
+/* ── ALL BUTTONS: base rule (outlined by default) ── */
+[data-testid="stSidebar"] .stButton > button,
+div.nb [data-testid="stButton"] > button,
+div.nav-btn [data-testid="stButton"] > button,
+div.nav-btn-active [data-testid="stButton"] > button {
+    font-family: var(--font) !important;
+    font-size: 12.5px !important;
+    font-weight: 500 !important;
+    width: 100% !important;
+    min-height: 36px !important;
+    border-radius: var(--radius) !important;
+    text-align: left !important;
+    transition: all 0.2s var(--ease) !important;
+    padding: 6px 11px !important;
+    outline: none !important;
 }
 
+/* Nav buttons — outlined, muted */
+div.nav-btn [data-testid="stButton"] > button {
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    border: 1.5px solid var(--border) !important;
+}
+div.nav-btn [data-testid="stButton"] > button:hover {
+    background: rgba(255,255,255,0.5) !important;
+    border-color: var(--border-hi) !important;
+    color: var(--text) !important;
+    transform: translateX(2px) !important;
+}
+
+/* Active nav button — olive outlined */
+div.nav-btn-active [data-testid="stButton"] > button {
+    background: rgba(107,122,70,0.1) !important;
+    color: var(--olive-hi) !important;
+    border: 1.5px solid var(--olive-lo) !important;
+    font-weight: 600 !important;
+    cursor: default !important;
+}
+
+/* New conversation button — coral-outlined */
+div.nb [data-testid="stButton"] > button {
+    background: var(--surface) !important;
+    color: var(--olive-hi) !important;
+    border: 1.5px solid var(--border-hi) !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    min-height: 40px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
+}
+div.nb [data-testid="stButton"] > button:hover {
+    background: #FFFFFF !important;
+    border-color: var(--olive) !important;
+    color: var(--coral) !important;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.1) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* History + account buttons — outlined */
 [data-testid="stSidebar"] .stButton > button {
-    width: 100%;
-    border-radius: 11px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(255, 255, 255, 0.02);
-    color: #cbd5e1;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 13.5px;
-    font-weight: 600;
-    min-height: 40px;
-    transition: all 0.2s ease;
+    background: transparent !important;
+    color: var(--text-muted) !important;
+    border: 1px solid var(--border) !important;
+    margin-bottom: 3px !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(255,255,255,0.45) !important;
+    border-color: var(--border-hi) !important;
+    color: var(--text) !important;
+    transform: translateX(2px) !important;
 }
 
-[data-testid="stSidebar"] .stButton > button:hover {
-    border-color: rgba(74, 222, 128, 0.3);
-    background: rgba(34, 197, 94, 0.08);
-    color: #ffffff;
+/* Sidebar selectboxes */
+[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+    color: var(--text-muted) !important;
+    font-family: var(--font) !important;
+    font-size: 9px !important;
+    font-weight: 700 !important;
+    letter-spacing: 1.5px !important;
+    text-transform: uppercase !important;
+    opacity: 0.65 !important;
+}
+[data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div {
+    background: var(--surface) !important;
+    border: 1.5px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    color: var(--text) !important;
+    font-family: var(--font) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+}
+[data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div:hover {
+    border-color: var(--olive-lo) !important;
 }
 
 /* =========================================================
-   MAIN HEADER (TOP STATUS BAR)
+   TOPBAR
    ========================================================= */
 
-.main-header {
-    height: 72px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+.topbar {
+    height: 58px;
+    border-bottom: 1.5px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 44px;
-    background: rgba(8, 11, 17, 0.75);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    padding: 0 36px;
+    background: rgba(237,230,214,0.92);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 1px 0 var(--border), 0 4px 16px rgba(0,0,0,0.04);
 }
-
-.main-header-title {
-    font-family: 'Space Grotesk', sans-serif;
+.topbar-left { display: flex; align-items: baseline; gap: 12px; }
+.topbar-title {
+    font-family: var(--font-display);
     font-size: 21px;
-    font-weight: 700;
-    color: #ffffff;
-    letter-spacing: -0.3px;
-}
-
-.main-header-subtitle {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 13px;
     font-weight: 400;
-    color: #94a3b8;
+    font-style: italic;
+    background: linear-gradient(135deg, var(--text) 40%, var(--coral) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.4px;
+    line-height: 1;
 }
-
-.header-status-badge {
+.topbar-divider {
+    width: 1.5px;
+    height: 16px;
+    background: var(--border-hi);
+    display: inline-block;
+    border-radius: 2px;
+}
+.topbar-sub {
+    font-family: var(--font);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 9.5px;
+}
+.topbar-pill {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 50px;
-    padding: 6px 16px;
-    font-size: 12.5px;
+    gap: 7px;
+    background: transparent;
+    border: 1.5px solid rgba(107,122,70,0.35);
+    border-radius: 100px;
+    padding: 5px 14px;
+    font-family: var(--font);
+    font-size: 11px;
     font-weight: 600;
-    color: #cbd5e1;
+    color: var(--olive-hi);
+    letter-spacing: 0.03em;
+    transition: all 0.2s var(--ease);
 }
-
-.pulse-dot {
-    width: 7px;
-    height: 7px;
-    background-color: #22c55e;
+.topbar-pill:hover {
+    background: rgba(107,122,70,0.08);
+    border-color: var(--olive);
+}
+.blink {
+    width: 5px; height: 5px;
     border-radius: 50%;
-    box-shadow: 0 0 8px #22c55e;
+    background: var(--olive);
+    animation: blink 2.2s ease-in-out infinite;
+}
+@keyframes blink {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.15; transform: scale(0.65); }
 }
 
 /* =========================================================
-   CHAT CONTAINER
+   CHAT WRAP
    ========================================================= */
 
-.chat-container {
-    max-width: 820px;
+.chat-wrap {
+    max-width: 720px;
     margin: 0 auto;
-    padding: 35px 20px 140px 20px;
+    padding: 28px 12px 140px;
 }
 
-/* EMPTY STATE */
-
-.empty-chat {
+/* Quick-start section (on chat page) */
+.qs-wrap {
     text-align: center;
-    padding-top: 75px;
-    padding-bottom: 40px;
+    padding: 68px 0 36px;
 }
-
-.empty-chat-avatar {
-    width: 74px;
-    height: 74px;
-    background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(56, 189, 248, 0.1));
-    border: 1px solid rgba(74, 222, 128, 0.35);
-    border-radius: 50%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+.qs-title {
+    font-family: var(--font-display);
     font-size: 38px;
-    margin-bottom: 18px;
-}
-
-.empty-chat-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 32px;
-    font-weight: 700;
-    color: #ffffff;
-    letter-spacing: -0.5px;
-}
-
-.empty-chat-text {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-size: 15px;
     font-weight: 400;
-    color: #94a3b8;
-    margin-top: 8px;
-    max-width: 500px;
-    margin-left: auto;
-    margin-right: auto;
-    line-height: 1.6;
+    font-style: italic;
+    color: var(--text);
+    letter-spacing: -0.8px;
+    line-height: 1.15;
+    margin-bottom: 10px;
 }
-
-.empty-chat-chips {
+.qs-title em { color: var(--coral); font-style: normal; }
+.qs-sub {
+    font-family: var(--font);
+    font-size: 15px;
+    color: var(--text-muted);
+    font-weight: 400;
+    max-width: 400px;
+    margin: 0 auto 32px;
+    line-height: 1.75;
+}
+.qs-row {
     display: flex;
-    gap: 10px;
-    justify-content: center;
     flex-wrap: wrap;
-    margin-top: 26px;
+    gap: 9px;
+    justify-content: center;
 }
-
-.empty-chip {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 30px;
-    padding: 7px 18px;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: #cbd5e1;
-    transition: all 0.2s ease;
+.qchip {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 100px;
+    padding: 8px 18px;
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: default;
+    transition: all 0.22s var(--ease);
+    letter-spacing: -0.1px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
-
-.empty-chip:hover {
-    border-color: rgba(74, 222, 128, 0.35);
-    background: rgba(34, 197, 94, 0.06);
-    color: #ffffff;
+.qchip:hover {
+    background: var(--olive-hi);
+    border-color: var(--olive-hi);
+    color: #F5F0E6;
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(74,89,32,0.25);
+}
+.qchip.coral {
+    border-color: rgba(196,64,40,0.35);
+    color: var(--coral);
+    background: rgba(196,64,40,0.04);
+}
+.qchip.coral:hover {
+    background: var(--coral);
+    border-color: var(--coral);
+    color: #FFF5F0;
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(196,64,40,0.3);
 }
 
 /* =========================================================
-   STREAMLIT CHAT MESSAGES (CLEAN & SUBTLE)
+   DASHBOARD
+   ========================================================= */
+
+.dash-wrap {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 12px 60px;
+}
+
+/* Olive hero band */
+.olive-band {
+    background: linear-gradient(130deg, #5C6E35 0%, #7B8C52 55%, #8FA068 100%);
+    border-radius: var(--radius-lg);
+    padding: 30px 32px;
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1.5px solid rgba(255,255,255,0.18);
+    box-shadow: 0 4px 24px rgba(74,89,32,0.25);
+}
+.olive-band::before {
+    content: '';
+    position: absolute;
+    top: -50px; right: -50px;
+    width: 180px; height: 180px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+}
+.olive-band::after {
+    content: '';
+    position: absolute;
+    bottom: -30px; left: 30%;
+    width: 100px; height: 100px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+}
+.olive-band-text { color: #E8F0D8; position: relative; z-index: 1; }
+.olive-band-title {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 400;
+    font-style: italic;
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+    line-height: 1.2;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.olive-band-sub {
+    font-family: var(--font);
+    font-size: 14px;
+    opacity: 0.78;
+    font-weight: 400;
+    line-height: 1.55;
+}
+.olive-band-lang {
+    font-family: var(--font);
+    font-size: 32px;
+    font-weight: 800;
+    color: rgba(255,255,255,0.92);
+    letter-spacing: -1.5px;
+    line-height: 1;
+    position: relative;
+    z-index: 1;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+/* Stats row */
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 24px;
+}
+.stat-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px 16px;
+    transition: all 0.22s var(--ease);
+    cursor: default;
+    position: relative;
+    overflow: hidden;
+}
+.stat-card::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 0;
+    width: 3px; height: 100%;
+    background: var(--olive-pale);
+    border-radius: 2px 0 0 2px;
+    opacity: 0;
+    transition: opacity 0.22s;
+}
+.stat-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 10px 28px rgba(0,0,0,0.1);
+    border-color: var(--olive-lo);
+    background: #FFFFFF;
+}
+.stat-card:hover::after { opacity: 1; }
+.stat-card.accent {
+    background: rgba(107,122,70,0.08);
+    border-color: rgba(107,122,70,0.3);
+}
+.stat-card.accent::after { background: var(--olive); opacity: 1; }
+.stat-card.accent:hover {
+    background: rgba(107,122,70,0.14);
+    border-color: var(--olive);
+    box-shadow: 0 10px 28px rgba(74,89,32,0.15);
+}
+.stat-value {
+    font-family: var(--font);
+    font-size: 38px;
+    font-weight: 800;
+    color: var(--olive-hi);
+    letter-spacing: -2px;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.stat-card.accent .stat-value { color: var(--olive); }
+.stat-label {
+    font-family: var(--font);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.3px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.8;
+}
+
+/* Section title */
+.dash-section-title {
+    font-family: var(--font);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    opacity: 0.65;
+}
+
+/* Recent sessions grid */
+.recents-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 24px;
+}
+.recent-item {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    transition: all 0.2s var(--ease);
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+.recent-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.09);
+    border-color: var(--olive-lo);
+    background: #FFFFFF;
+}
+.recent-lang {
+    font-family: var(--font);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--olive-lo);
+    background: rgba(107,122,70,0.1);
+    border: 1px solid rgba(107,122,70,0.2);
+    border-radius: 5px;
+    padding: 2px 6px;
+    margin-top: 1px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.recent-info { flex: 1; min-width: 0; }
+.recent-title-text {
+    font-family: var(--font);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.35;
+    margin-bottom: 2px;
+}
+.recent-meta-text {
+    font-family: var(--font);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* =========================================================
+   MESSAGES
    ========================================================= */
 
 [data-testid="stChatMessage"] {
-    max-width: 820px;
-    margin-left: auto;
-    margin-right: auto;
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    background: rgba(13, 17, 26, 0.65) !important;
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.06) !important;
-    border-radius: 18px !important;
-    padding: 16px 22px !important;
-    margin-bottom: 14px !important;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
-    color: #f1f5f9 !important;
+    max-width: 720px;
+    margin: 0 auto 8px !important;
+    font-family: var(--font) !important;
+    background: var(--surface) !important;
+    border: 1.5px solid var(--border) !important;
+    border-radius: var(--radius-lg) !important;
+    padding: 16px 20px !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04) !important;
+    color: var(--text) !important;
+    transition: box-shadow 0.22s var(--ease), border-color 0.22s var(--ease), transform 0.22s var(--ease) !important;
 }
-
+[data-testid="stChatMessage"]:hover {
+    box-shadow: 0 6px 20px rgba(0,0,0,0.08) !important;
+    border-color: var(--border-hi) !important;
+    transform: translateY(-1px) !important;
+}
 [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-    background: rgba(18, 28, 22, 0.7) !important;
-    border: 1px solid rgba(74, 222, 128, 0.25) !important;
+    background: var(--surface-2) !important;
+    border-color: var(--border) !important;
+    box-shadow: none !important;
+}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]):hover {
+    transform: none !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04) !important;
 }
 
-/* =========================================================
-   MINIMALISTIC CENTERED CHAT INPUT & MICROPHONE DOCK
-   ========================================================= */
-
-/* CENTERED MINIMALISTIC CHAT INPUT */
-
-[data-testid="stChatInput"] {
-    width: 100% !important;
-    max-width: 680px !important;
-    margin: 0 auto !important;
-    bottom: 24px !important;
-    padding: 0 !important;
-}
-
-[data-testid="stChatInput"] > div {
-    border-radius: 30px !important;
-    border: 1px solid rgba(255, 255, 255, 0.12) !important;
-    background: rgba(15, 23, 42, 0.96) !important;
-    backdrop-filter: blur(24px) !important;
-    -webkit-backdrop-filter: blur(24px) !important;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 20px rgba(34, 197, 94, 0.08) !important;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
-    padding: 4px 8px !important;
-}
-
-[data-testid="stChatInput"] > div:focus-within {
-    border-color: rgba(74, 222, 128, 0.6) !important;
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 0 30px rgba(74, 222, 128, 0.2) !important;
-    transform: translateY(-2px);
-}
-
-[data-testid="stChatInput"] textarea {
-    font-family: 'Plus Jakarta Sans', sans-serif !important;
-    font-size: 14.5px !important;
-    font-weight: 500 !important;
-    color: #f8fafc !important;
-    padding-left: 12px !important;
-}
-
-[data-testid="stChatInput"] textarea::placeholder {
-    color: #64748b !important;
-}
-
-/* =========================================================
-   MOBILE RESPONSIVENESS
-   ========================================================= */
-
-@media (max-width: 700px) {
-    .main-header {
-        padding: 0 20px;
-    }
-
-    .chat-container {
-        padding-left: 16px;
-        padding-right: 16px;
-    }
-
-    .empty-chat-title {
-        font-size: 26px;
-    }
-
-    [data-testid="stChatInput"] {
-        max-width: 92% !important;
-    }
-}
-/* =========================================================
-   HISTORY BUTTONS
-   ========================================================= */
-
-.history-button [data-testid="stButton"] > button {
-    width: 100%;
-    text-align: left !important;
-    padding: 10px 12px !important;
-    border-radius: 11px !important;
-    margin-bottom: 6px !important;
-    background: rgba(255, 255, 255, 0.02) !important;
-    border: 1px solid rgba(255, 255, 255, 0.04) !important;
-    color: #e2e8f0 !important;
-    font-family: 'Plus Jakarta Sans', sans-serif !important;
-    font-size: 13px !important;
-    font-weight: 600 !important;
-}
-
-.history-button [data-testid="stButton"] > button:hover {
-    background: rgba(34, 197, 94, 0.07) !important;
-    border-color: rgba(74, 222, 128, 0.25) !important;
-}
-
-/* =========================================================
-   CHAT TEXT VISIBILITY FIX
-   ========================================================= */
-
-/* Main text inside every chat message */
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] div,
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] span,
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li {
-    color: #f1f5f9 !important;
+    color: #22200A !important;
+    font-family: var(--font) !important;
+    font-size: 15px !important;
+    line-height: 1.8 !important;
+}
+[data-testid="stChatMessage"] h1,[data-testid="stChatMessage"] h2,
+[data-testid="stChatMessage"] h3,[data-testid="stChatMessage"] h4 {
+    font-family: var(--font-display) !important;
+    color: var(--text) !important;
+    font-weight: 400 !important;
+    font-style: italic !important;
+    font-size: 22px !important;
+    letter-spacing: -0.4px !important;
+    margin-top: 14px !important;
+    margin-bottom: 6px !important;
+}
+[data-testid="stChatMessage"] strong, [data-testid="stChatMessage"] b {
+    font-weight: 700 !important;
+    color: var(--olive-hi) !important;
+}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdownContainer"] p {
+    color: #30291A !important;
+    font-size: 15px !important;
 }
 
-/* Headings */
-[data-testid="stChatMessage"] h1,
-[data-testid="stChatMessage"] h2,
-[data-testid="stChatMessage"] h3,
-[data-testid="stChatMessage"] h4,
-[data-testid="stChatMessage"] h5,
-[data-testid="stChatMessage"] h6 {
-    color: #ffffff !important;
+/* Rhet label */
+.rhet-label {
+    font-family: var(--font);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--coral);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
-
-/* Strong / bold labels */
-[data-testid="stChatMessage"] strong,
-[data-testid="stChatMessage"] b {
-    color: #ffffff !important;
+.rhet-label::before {
+    content: '';
+    width: 18px;
+    height: 2px;
+    background: var(--coral);
+    border-radius: 2px;
+    flex-shrink: 0;
 }
-
-/* User message text */
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"])
-[data-testid="stMarkdownContainer"] {
-    color: #f8fafc !important;
+.rhet-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
 }
-
-/* Rhet main response */
-[data-testid="stChatMessage"] .rhet-response {
-    color: #f8fafc !important;
+.rhet-response {
+    font-family: var(--font);
     font-size: 15px;
-    line-height: 1.7;
+    line-height: 1.82;
+    color: #22200A;
+    font-weight: 400;
+}
+
+/* Score badges */
+.score-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 14px 0 6px;
+}
+.score-badge {
+    background: linear-gradient(145deg, rgba(123,140,82,0.12) 0%, rgba(107,122,70,0.06) 100%);
+    border: 1.5px solid rgba(123,140,82,0.3);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-family: var(--font);
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--olive-hi);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 80px;
+    letter-spacing: -1px;
+    transition: all 0.22s var(--ease);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.score-badge:hover {
+    background: linear-gradient(145deg, rgba(123,140,82,0.22) 0%, rgba(107,122,70,0.12) 100%);
+    border-color: var(--olive);
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(74,89,32,0.18);
+}
+.score-badge span {
+    font-family: var(--font);
+    font-size: 9.5px;
+    color: var(--olive-lo);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+}
+
+/* Page + request loading overlays */
+.page-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(246, 235, 222, 0.38);
+    backdrop-filter: blur(7px);
+    -webkit-backdrop-filter: blur(7px);
+    pointer-events: none;
+    animation: rhet-page-loader-out 0.62s ease 0.12s forwards;
+}
+.page-loading-card {
+    width: min(290px, calc(100vw - 48px));
+    padding: 18px 22px;
+    border: 1px solid rgba(107,122,70,0.28);
+    border-radius: 15px;
+    background: rgba(255,255,255,0.94);
+    box-shadow: 0 14px 38px rgba(74,89,32,0.16);
+    text-align: center;
+}
+.page-loading-spinner {
+    width: 28px;
+    height: 28px;
+    margin: 0 auto 10px;
+    border: 3px solid rgba(107,122,70,0.18);
+    border-top-color: var(--olive);
+    border-radius: 50%;
+    animation: rhet-spin 0.8s linear infinite;
+}
+.page-loading-title {
+    font-family: var(--font);
+    font-size: 14px;
+    font-weight: 800;
+    color: var(--olive-hi);
+}
+.page-loading-sub {
+    margin-top: 4px;
+    font-family: var(--font);
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+/* Chat request loader: stays inside the conversation area. */
+.chat-processing-loader {
+    display: flex;
+    justify-content: flex-start;
+    margin: 8px 0 12px 0;
+    pointer-events: none;
+}
+.chat-processing-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(360px, 90%);
+    padding: 10px 14px;
+    border: 1px solid rgba(107,122,70,0.20);
+    border-radius: 14px;
+    background: rgba(255,255,255,0.94);
+    box-shadow: 0 7px 18px rgba(74,89,32,0.10);
+}
+.chat-processing-spinner {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    border: 2px solid rgba(107,122,70,0.18);
+    border-top-color: var(--olive);
+    border-radius: 50%;
+    animation: rhet-spin 0.72s linear infinite;
+}
+.chat-processing-title {
+    font-family: var(--font);
+    font-size: 12.5px;
+    font-weight: 800;
+    color: var(--olive-hi);
+}
+.chat-processing-sub {
+    margin-top: 2px;
+    font-family: var(--font);
+    font-size: 10.5px;
+    color: var(--text-muted);
+}
+@keyframes rhet-spin {
+    to { transform: rotate(360deg); }
+}
+@keyframes rhet-page-loader-out {
+    0% { opacity: 1; visibility: visible; }
+    100% { opacity: 0; visibility: hidden; }
 }
 
 /* Translation */
-[data-testid="stChatMessage"] .translation-text {
-    color: #cbd5e1 !important;
-    line-height: 1.6;
+.translation-text {
+    font-family: var(--font);
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    padding: 11px 0 5px;
+    border-top: 1.5px solid var(--border);
+    margin-top: 12px;
+    font-style: italic;
 }
 
-/* Tutor feedback */
-[data-testid="stChatMessage"] [data-testid="stAlert"] {
-    background: rgba(30, 41, 59, 0.85) !important;
-    border: 1px solid rgba(96, 165, 250, 0.18) !important;
+/* Feedback */
+.feedback-box {
+    background: linear-gradient(135deg, rgba(123,140,82,0.1) 0%, rgba(107,122,70,0.05) 100%);
+    border: 1.5px solid rgba(123,140,82,0.28);
+    border-left: 3px solid var(--olive);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-family: var(--font);
+    font-size: 14px;
+    color: var(--olive-hi);
+    line-height: 1.7;
+    margin: 12px 0 4px;
+    transition: all 0.2s var(--ease);
+}
+.feedback-box:hover {
+    border-left-color: var(--olive-card);
+    background: linear-gradient(135deg, rgba(123,140,82,0.15) 0%, rgba(107,122,70,0.08) 100%);
 }
 
-[data-testid="stChatMessage"] [data-testid="stAlert"] p,
-[data-testid="stChatMessage"] [data-testid="stAlert"] div {
-    color: #dbeafe !important;
+/* Try saying */
+.next-target {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(196,64,40,0.06);
+    border: 1.5px solid rgba(196,64,40,0.25);
+    border-left: 3px solid var(--coral);
+    border-radius: var(--radius);
+    padding: 10px 16px;
+    margin-top: 14px;
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--coral);
+    transition: all 0.22s var(--ease);
+    box-shadow: 0 1px 4px rgba(196,64,40,0.08);
+}
+.next-target:hover {
+    background: rgba(196,64,40,0.1);
+    border-color: var(--coral);
+    border-left-color: var(--coral);
+    transform: translateX(4px);
+    box-shadow: 0 4px 12px rgba(196,64,40,0.15);
+}
+.next-target-label {
+    font-family: var(--font);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
+    color: rgba(196,64,40,0.6);
+    white-space: nowrap;
 }
 
-/* Captions such as "You said" */
+/* Captions */
 [data-testid="stChatMessage"] [data-testid="stCaptionContainer"],
 [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] p {
-    color: #94a3b8 !important;
+    color: var(--text-muted) !important;
+    font-family: var(--font) !important;
+    font-size: 11.5px !important;
 }
-
-/* Metrics */
-[data-testid="stChatMessage"] [data-testid="stMetricLabel"] {
-    color: #94a3b8 !important;
+[data-testid="stChatMessage"] [data-testid="stAlert"] {
+    background: rgba(123,140,82,0.07) !important;
+    border: 1.5px solid rgba(123,140,82,0.2) !important;
+    border-radius: var(--radius) !important;
 }
-
-[data-testid="stChatMessage"] [data-testid="stMetricValue"] {
-    color: #f8fafc !important;
+[data-testid="stChatMessage"] [data-testid="stAlert"] p,
+[data-testid="stChatMessage"] [data-testid="stAlert"] div {
+    color: var(--olive-hi) !important;
+    font-family: var(--font) !important;
+    font-size: 13px !important;
 }
-
-/* Inline target sentence */
+[data-testid="stChatMessage"] [data-testid="stMetricLabel"] { color: var(--text-muted) !important; }
+[data-testid="stChatMessage"] [data-testid="stMetricValue"] { color: var(--olive-hi) !important; font-weight: 700 !important; }
 [data-testid="stChatMessage"] code {
-    color: #166534 !important;
-    background: #f0fdf4 !important;
-    border: 1px solid rgba(74, 222, 128, 0.25) !important;
-    border-radius: 6px !important;
-    padding: 3px 7px !important;
+    font-family: var(--mono) !important;
+    color: var(--coral) !important;
+    background: rgba(196,80,48,0.07) !important;
+    border: 1px solid rgba(196,80,48,0.18) !important;
+    border-radius: 5px !important;
+    padding: 1px 7px !important;
+    font-size: 12.5px !important;
 }
-
-/* Audio player spacing */
 [data-testid="stChatMessage"] audio {
     width: 100% !important;
+    height: 34px !important;
+    border-radius: 7px;
+    margin-top: 8px;
+    opacity: 0.8;
+    transition: opacity 0.2s;
 }
+[data-testid="stChatMessage"] audio:hover { opacity: 1; }
 
 /* =========================================================
-   CHAT INPUT BUTTONS
+   CHAT INPUT
    ========================================================= */
 
-/* Mic + Send buttons inside the chat bar */
+[data-testid="stChatInput"] {
+    width: 100% !important;
+    max-width: 640px !important;
+    margin: 0 auto !important;
+    bottom: 18px !important;
+    padding: 0 !important;
+}
+[data-testid="stChatInput"] > div {
+    border-radius: var(--radius-lg) !important;
+    border: 1.5px solid var(--border-hi) !important;
+    background: #FFFFFF !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.09) !important;
+    transition: border-color 0.22s, box-shadow 0.22s !important;
+    padding: 3px 5px !important;
+}
+[data-testid="stChatInput"] > div:focus-within {
+    border-color: var(--olive) !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.09), 0 0 0 3px rgba(107,122,70,0.12) !important;
+}
+[data-testid="stChatInput"] textarea {
+    font-family: var(--font) !important;
+    font-size: 14px !important;
+    color: var(--text) !important;
+    background: transparent !important;
+    padding-left: 8px !important;
+}
+[data-testid="stChatInput"] textarea::placeholder {
+    color: #B8B0A0 !important;
+    font-style: italic !important;
+}
 [data-testid="stChatInput"] button {
-    background: #1f2937 !important;
-    color: #4ade80 !important;
-    border: 1px solid rgba(74, 222, 128, 0.18) !important;
-    border-radius: 12px !important;
-    width: 38px !important;
-    height: 38px !important;
-    transition: all 0.2s ease !important;
+    background: transparent !important;
+    color: var(--olive) !important;
+    border: 1.5px solid rgba(107,122,70,0.28) !important;
+    border-radius: 8px !important;
+    width: 34px !important;
+    height: 34px !important;
+    transition: all 0.18s var(--ease) !important;
 }
-
-/* Hover */
 [data-testid="stChatInput"] button:hover {
-    background: #22c55e !important;
-    color: #06120a !important;
-    border-color: #4ade80 !important;
-    box-shadow: 0 0 16px rgba(34, 197, 94, 0.25) !important;
-    transform: translateY(-1px);
+    background: rgba(107,122,70,0.1) !important;
+    border-color: var(--olive) !important;
+    color: var(--olive-hi) !important;
+    transform: scale(1.06) !important;
 }
-
-/* Pressed */
-[data-testid="stChatInput"] button:active {
-    background: #16a34a !important;
-    color: #ffffff !important;
-    transform: scale(0.95);
-}
-
-/* Disabled send button */
 [data-testid="stChatInput"] button:disabled {
-    background: rgba(31, 41, 55, 0.65) !important;
-    color: #475569 !important;
-    border-color: rgba(255, 255, 255, 0.05) !important;
-    box-shadow: none !important;
-    transform: none !important;
-    opacity: 1 !important;
+    background: transparent !important;
+    color: #C0B8A8 !important;
+    border-color: var(--border) !important;
+}
+[data-testid="stChatInput"] button svg { color: currentColor !important; stroke: currentColor !important; }
+
+/* =========================================================
+   MOBILE
+   ========================================================= */
+@media (max-width: 680px) {
+    .topbar { padding: 0 16px; }
+    .chat-wrap, .dash-wrap { padding-left: 10px; padding-right: 10px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .recents-grid { grid-template-columns: 1fr; }
+    [data-testid="stChatInput"] { max-width: 94% !important; }
+}
+/* =========================================================
+   BACKGROUND DECORATIVE DOTS
+   ========================================================= */
+
+.bg-dots {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    overflow: hidden;
 }
 
-/* SVG icons */
-[data-testid="stChatInput"] button svg {
-    color: currentColor !important;
-    stroke: currentColor !important;
+/* Base dot style */
+.dot {
+    position: absolute;
+    border-radius: 50%;
+    background: radial-gradient(
+        circle,
+        rgba(107,122,70,0.38) 0%,
+        rgba(107,122,70,0.18) 50%,
+        transparent 100%
+    );
+    box-shadow:
+        inset 0 0 0 1.5px rgba(107,122,70,0.5),
+        0 0 0 12px rgba(107,122,70,0.1),
+        0 0 0 30px rgba(107,122,70,0.04),
+        0 0 0 60px rgba(107,122,70,0.015);
 }
 
+/* Dot 1 — large, top-left, mostly offscreen */
+.dot-1 {
+    width: 380px; height: 380px;
+    top: -120px; left: -100px;
+    background: radial-gradient(circle, rgba(91,110,50,0.45) 0%, rgba(107,122,70,0.22) 55%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(107,122,70,0.55),
+        0 0 0 18px rgba(107,122,70,0.12),
+        0 0 0 50px rgba(107,122,70,0.05),
+        0 0 0 90px rgba(107,122,70,0.018);
+}
+
+/* Dot 2 — medium, top-right */
+.dot-2 {
+    width: 240px; height: 240px;
+    top: -50px; right: 80px;
+    background: radial-gradient(circle, rgba(91,110,53,0.4) 0%, rgba(91,110,53,0.18) 55%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(91,110,53,0.5),
+        0 0 0 14px rgba(91,110,53,0.1),
+        0 0 0 38px rgba(91,110,53,0.035);
+}
+
+/* Dot 3 — large, right-center */
+.dot-3 {
+    width: 320px; height: 320px;
+    top: 38%; right: -100px;
+    background: radial-gradient(circle, rgba(123,140,82,0.38) 0%, rgba(123,140,82,0.16) 55%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(123,140,82,0.48),
+        0 0 0 20px rgba(123,140,82,0.09),
+        0 0 0 55px rgba(123,140,82,0.03);
+}
+
+/* Dot 4 — medium, bottom-left */
+.dot-4 {
+    width: 280px; height: 280px;
+    bottom: 60px; left: -60px;
+    background: radial-gradient(circle, rgba(107,122,70,0.42) 0%, rgba(107,122,70,0.2) 55%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(107,122,70,0.52),
+        0 0 0 16px rgba(107,122,70,0.1),
+        0 0 0 45px rgba(107,122,70,0.035);
+}
+
+/* Dot 5 — small, left-center */
+.dot-5 {
+    width: 160px; height: 160px;
+    top: 52%; left: 14%;
+    background: radial-gradient(circle, rgba(107,122,70,0.35) 0%, rgba(107,122,70,0.14) 60%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(107,122,70,0.45),
+        0 0 0 10px rgba(107,122,70,0.08),
+        0 0 0 28px rgba(107,122,70,0.025);
+}
+
+/* Dot 6 — medium, bottom-right */
+.dot-6 {
+    width: 220px; height: 220px;
+    bottom: -50px; right: 12%;
+    background: radial-gradient(circle, rgba(91,110,53,0.38) 0%, rgba(91,110,53,0.16) 55%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1.5px rgba(91,110,53,0.48),
+        0 0 0 12px rgba(91,110,53,0.09),
+        0 0 0 34px rgba(91,110,53,0.03);
+}
+
+/* Dot 7 — tiny, upper-center */
+.dot-7 {
+    width: 110px; height: 110px;
+    top: 22%; left: 42%;
+    background: radial-gradient(circle, rgba(107,122,70,0.32) 0%, rgba(107,122,70,0.12) 60%, transparent 100%);
+    box-shadow:
+        inset 0 0 0 1px rgba(107,122,70,0.42),
+        0 0 0 8px rgba(107,122,70,0.07),
+        0 0 0 22px rgba(107,122,70,0.02);
+}
+
+/* Ensure all content sits above dot layer */
+[data-testid="stSidebar"],
+[data-testid="stMain"],
+[data-testid="stBottom"] {
+    position: relative;
+    z-index: 1;
+}
 </style>
 """, unsafe_allow_html=True)
+
+# Inject fixed background dot layer
+st.markdown("""
+<div class="bg-dots" aria-hidden="true">
+  <span class="dot dot-1"></span>
+  <span class="dot dot-2"></span>
+  <span class="dot dot-3"></span>
+  <span class="dot dot-4"></span>
+  <span class="dot dot-5"></span>
+  <span class="dot dot-6"></span>
+  <span class="dot dot-7"></span>
+</div>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# PAGE TRANSITION LOADER
+# ============================================================
+if (
+    st.session_state.get("navigation_loading")
+    and not st.session_state.get("chat_request_pending")
+):
+    st.markdown(
+        """
+        <div class="page-loading-overlay" aria-live="polite">
+          <div class="page-loading-card">
+            <div class="page-loading-spinner"></div>
+            <div class="page-loading-title">Loading Rhet…</div>
+            <div class="page-loading-sub">Opening your page</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Do not sleep or wait for another Streamlit rerun. The CSS animation
+    # dismisses the overlay in the browser while the new page is already rendered.
+    st.session_state.navigation_loading = False
 
 # ============================================================
 # RESTORE PENDING HISTORY
@@ -879,32 +1653,57 @@ if st.session_state.pending_history_restore is not None:
 
 
 # ============================================================
-# SIDEBAR (NO HOME BUTTON, FILLED WITH RECENTS)
+# AUTHENTICATION GATE — CHAT REQUIRES A LOCAL ACCOUNT
+# ============================================================
+if st.session_state.page == "chat" and not st.session_state.user_account:
+    st.session_state.page = "signup"
+
+# ============================================================
+# SIDEBAR (EXISTING FRONTEND + FUNCTIONAL ACCOUNT NAVIGATION)
 # ============================================================
 
 with st.sidebar:
-    # LOGO
-    st.markdown("""<div class="sidebar-logo"><span>🦜</span> parrhet<span class="mint">.ai</span></div>""", unsafe_allow_html=True)
+    st.markdown('<div class="sb-logo">parrhet<span class="sb-logo-accent">.ai</span></div>', unsafe_allow_html=True)
 
-    # NEW CONVERSATION BUTTON
-    st.markdown('<div class="new-conv-btn">', unsafe_allow_html=True)
-    if st.button(
-        "＋  New conversation",
-        use_container_width=True
-    ):
+    # ── Navigation ────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-label">Navigate</div>', unsafe_allow_html=True)
 
-        save_current_conversation()
+    home_cls = "nav-btn-active" if st.session_state.page == "home" else "nav-btn"
+    chat_cls = "nav-btn-active" if st.session_state.page == "chat" else "nav-btn"
 
-        st.session_state.messages = []
-        st.session_state.orchestrator = MasterOrchestrator()
-        st.session_state.next_target = ""
-        st.session_state.conversation_id = str(uuid.uuid4())
-
+    st.markdown(f'<div class="{home_cls}">', unsafe_allow_html=True)
+    if st.button("Home", use_container_width=True, key="nav_home"):
+        navigate_to("home")
         st.rerun()
-
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">LEARNER</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="{chat_cls}">', unsafe_allow_html=True)
+    if st.button("Chat", use_container_width=True, key="nav_chat"):
+        if st.session_state.user_account:
+            navigate_to("chat")
+        else:
+            navigate_to("signup")
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── New conversation button ───────────────────────────────────────────
+    st.markdown('<div class="sb-label">Session</div>', unsafe_allow_html=True)
+    st.markdown('<div class="nb">', unsafe_allow_html=True)
+    if st.button("+ New conversation", use_container_width=True, key="new_conversation"):
+        if not st.session_state.user_account:
+            navigate_to("signup")
+        else:
+            save_current_conversation()
+            st.session_state.messages = []
+            st.session_state.orchestrator = MasterOrchestrator()
+            st.session_state.next_target = ""
+            st.session_state.conversation_id = str(uuid.uuid4())
+            navigate_to("chat")
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Existing learner settings ─────────────────────────────────────────
+    st.markdown('<div class="sb-label">Settings</div>', unsafe_allow_html=True)
 
     native_language = st.selectbox(
         "Native language",
@@ -927,553 +1726,807 @@ with st.sidebar:
         key="proficiency_level"
     )
 
-    # ============================================================
-    # RECENT CONVERSATIONS
-    # ============================================================
-
-    st.markdown(
-        '<div class="section-title">RECENT CONVERSATIONS</div>',
-        unsafe_allow_html=True
-    )
+    # ── Recent ────────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-label">Recent</div>', unsafe_allow_html=True)
 
     if not st.session_state.chat_history:
-
         st.markdown(
-            """
-            <div class="recent-card">
-                <div class="recent-details">
-                    <div class="recent-title">
-                        No conversations yet
-                    </div>
-                    <div class="recent-meta">
-                        Start chatting to build your history
-                    </div>
-                </div>
-            </div>
-            """,
+            '<div class="sb-card"><div class="sb-card-title">No conversations yet</div>'
+            '<div class="sb-card-meta">Start chatting to build your history</div></div>',
             unsafe_allow_html=True
         )
-
     else:
-
         for item in st.session_state.chat_history[:8]:
-
-            conversation_id = item.get(
-                "id",
-                str(uuid.uuid4())
-            )
-
-            title = item.get(
-                "title",
-                "Conversation"
-            )
-
-            # Always derive flag from target language
-            flag = get_language_flag(
-                item.get(
-                    "target_language",
-                    "Spanish"
-                )
-            )
-
+            conversation_id = item.get("id", str(uuid.uuid4()))
+            title = item.get("title", "Conversation")
             if st.button(
-                f"{flag}  {title}",
+                title,
                 key=f"history_{conversation_id}",
                 use_container_width=True
             ):
-
-                st.session_state.pending_history_restore = item
+                if not st.session_state.user_account:
+                    navigate_to("signup")
+                else:
+                    navigate_to("chat", pending_history=item)
                 st.rerun()
 
-                    
-    # ACCOUNT SECTION
-    st.markdown('<div class="account-section"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">ACCOUNT</div>', unsafe_allow_html=True)
+    # ── Account ───────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-label">Account</div>', unsafe_allow_html=True)
 
-    st.button("⚙  Settings", use_container_width=True)
-    st.button("👤  Profile", use_container_width=True)
+    if st.session_state.user_account:
+        if st.button("Profile", use_container_width=True, key="account_profile"):
+            navigate_to("profile")
+            st.rerun()
+    else:
+        if st.button("Sign up", use_container_width=True, key="account_signup"):
+            navigate_to("signup")
+            st.rerun()
+
+    if st.button("Settings", use_container_width=True, key="account_settings"):
+        navigate_to("settings")
+        st.rerun()
 
 # ============================================================
-# MAIN HEADER
+# TOPBAR
 # ============================================================
 
-st.markdown("""<div class="main-header">
-<div>
-<div class="main-header-title">parrhet.ai Studio</div>
-<div class="main-header-subtitle">Interactive Conversational Practice</div>
+_page_labels = {
+    "home": "Dashboard",
+    "chat": "Conversation",
+    "settings": "Settings",
+    "profile": "Profile",
+    "signup": "Sign up",
+}
+_page_label = _page_labels.get(st.session_state.page, "Dashboard")
+st.markdown(f"""
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-title">parrhet.ai</span>
+    <span class="topbar-divider"></span>
+    <span class="topbar-sub">{_page_label}</span>
+  </div>
+  <div class="topbar-pill"><span class="blink"></span>Ready</div>
 </div>
-<div class="header-status-badge"><span class="pulse-dot"></span> Ready to Speak</div>
-</div>""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # ============================================================
-# CHAT CONTAINER
+# PAGE ROUTER
 # ============================================================
 
-st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+if st.session_state.page == "home":
 
-# ============================================================
-# EMPTY CHAT STATE
-# ============================================================
+    # ── DASHBOARD ────────────────────────────────────────────────────────
+    st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
 
-if len(st.session_state.messages) == 0:
-    st.markdown("""<div class="empty-chat">
-<div class="empty-chat-avatar">🦜</div>
-<div class="empty-chat-title">Start a Conversation</div>
-<div class="empty-chat-text">Practice real-time speaking, learn conversational vocabulary, polish your accent, or ask Parrhet anything in 50+ languages.</div>
-<div class="empty-chat-chips">
-<span class="empty-chip">🇪🇸 Practice Spanish conversational basics</span>
-<span class="empty-chip">🇫🇷 Help me order food in Paris</span>
-<span class="empty-chip">🇯🇵 Practice Hiragana & Katakana</span>
-<span class="empty-chip">💡 Explain past tense grammar</span>
-</div>
-</div>""", unsafe_allow_html=True)
+    tl = st.session_state.get("target_language", "Spanish")
+    lvl = st.session_state.get("proficiency_level", "A1")
+    flag = get_language_flag(tl)
+    total_sessions = len(st.session_state.chat_history)
+    langs_tried = len(set(
+        item.get("target_language", "") for item in st.session_state.chat_history
+    )) or 1
 
-# ============================================================
-# DISPLAY MESSAGES
-# ============================================================
+    # Olive hero band
+    st.markdown(f"""
+    <div class="olive-band">
+      <div class="olive-band-text">
+        <div class="olive-band-title">Ready to practise, linguist?</div>
+        <div class="olive-band-sub">
+          Youre studying {tl} at level {lvl}.<br>
+          Jump into a conversation and Rhet will guide you.
+        </div>
+      </div>
+      <div class="olive-band-lang">{flag}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-for message in st.session_state.messages:
+    # Stats row
+    st.markdown(f"""
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-value">{total_sessions}</div>
+        <div class="stat-label">Sessions</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">{langs_tried}</div>
+        <div class="stat-label">Languages</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">{lvl}</div>
+        <div class="stat-label">Current Level</div>
+      </div>
+      <div class="stat-card accent">
+        <div class="stat-value" style="font-size:20px;letter-spacing:0">streak</div>
+        <div class="stat-label">Keep It Up</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with st.chat_message(message["role"]):
+    # Recent sessions
+    if st.session_state.chat_history:
+        recent = st.session_state.chat_history[:4]
+        st.markdown('<div class="dash-section-title">Recent Sessions</div>', unsafe_allow_html=True)
+        st.markdown('<div class="recents-grid">', unsafe_allow_html=True)
+        for idx, item in enumerate(recent):
+            rlang = item.get("target_language", "Spanish")
+            rlvl = item.get("level", "")
+            rtitle = item.get("title", "Conversation")[:38]
+            conversation_id = item.get("id", str(uuid.uuid4()))
+            if st.button(
+                f"{get_language_flag(rlang)}  {rtitle}  ·  {rlang} {rlvl}",
+                key=f"dashboard_history_{conversation_id}_{idx}",
+                use_container_width=True
+            ):
+                if not st.session_state.user_account:
+                    navigate_to("signup")
+                else:
+                    navigate_to("chat", pending_history=item)
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        if message["role"] == "user":
-            st.write(message["content"])
-            continue
 
-        result = message["content"]
+    st.markdown('</div>', unsafe_allow_html=True)
 
-        reply = result.get(
-            "conversational_reply",
-            ""
-        )
+elif st.session_state.page == "settings":
 
-        if reply:
-            st.markdown(
-                f'<div class="rhet-response"><strong>🦜 Rhet</strong><br>{reply}</div>',
-                unsafe_allow_html=True
-            )
+    # ── SETTINGS PAGE ───────────────────────────────────────────────────
+    st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="dash-section-title">Settings & learning preferences</div>', unsafe_allow_html=True)
 
-        transcript = result.get(
-            "transcript",
-            ""
-        )
-
-        if transcript:
-            st.caption(
-                f"🎙️ You said: {transcript}"
-            )
-
-        scores = result.get(
-            "pronunciation_scores"
-        )
-
-        if scores:
-            st.markdown(
-                "**🗣️ Pronunciation**"
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.metric(
-                    "Pronunciation",
-                    f"{scores.get('pronunciation_score', 0):.1f}/100"
-                )
-
-            with col2:
-                st.metric(
-                    "Accuracy",
-                    f"{scores.get('accuracy_score', 0):.1f}/100"
-                )
-
-            st.caption(
-                f"Fluency: "
-                f"{scores.get('fluency_score', 0):.1f} • "
-                f"Completeness: "
-                f"{scores.get('completeness_score', 0):.1f}"
-            )
-
-        # Pronunciation guide
-        pronunciation = result.get(
-            "pronunciation",
-            ""
-        )
-
-        if pronunciation:
-            st.markdown(
-                f"**🔊 Pronunciation**\n\n{pronunciation}"
-            )
-
-        pronunciation_audio_path = result.get(
-            "pronunciation_audio_path"
-        )
-
-        if (
-            pronunciation_audio_path
-            and os.path.exists(pronunciation_audio_path)
-        ):
-            st.audio(
-                pronunciation_audio_path,
-                format="audio/wav"
-            )
-
-        # Native-language translation
-        translation = result.get(
-            "translation",
-            ""
-        )
-
-        if translation:
-            st.markdown(
-                f"**🌐 Translation**\n\n{translation}"
-            )
-
-        # Teaching feedback
-        feedback = result.get(
-            "pedagogical_feedback",
-            ""
-        )
-
-        if feedback:
-            st.info(
-                f"💡 {feedback}"
-            )
-
-        # Practice target
-        next_target = result.get(
-            "suggested_next_target",
-            ""
-        ) or ""
-
-        if next_target:
-            st.markdown(
-                f"**🎯 Try saying:** `{next_target}`"
-            )
-
-        target_audio_path = result.get(
-            "target_audio_path"
-        )
-
-        if (
-            target_audio_path
-            and os.path.exists(target_audio_path)
-        ):
-            st.audio(
-                target_audio_path,
-                format="audio/wav"
-            )
-
-# ============================================================
-# CENTERED MINIMALISTIC CHAT INPUT
-# ============================================================
-
-submission = st.chat_input(
-    "Speak or message in any language...",
-    key="chat_input",
-    accept_audio=True,
-    audio_sample_rate=16000,
-)
-
-# ============================================================
-# HANDLE TEXT + VOICE SUBMISSION
-# ============================================================
-
-if submission is not None:
-
-    # --------------------------------------------------------
-    # GET TEXT + AUDIO FROM THE SAME CHAT INPUT
-    # --------------------------------------------------------
-
-    text_input = (
-        submission.text.strip()
-        if submission.text
-        else ""
+    st.markdown(
+        """<div class="olive-band">
+          <div class="olive-band-text">
+            <div class="olive-band-title">Make Rhet fit your learning.</div>
+            <div class="olive-band-sub">Control what you practise, how long you practise, and how Rhet coaches you. Everything is saved locally in this browser.</div>
+          </div>
+          <div class="olive-band-lang">⚙️</div>
+        </div>""", unsafe_allow_html=True
     )
 
-    audio_input = submission.audio
+    languages_native = ["English", "Hindi", "French", "Spanish", "German"]
+    languages_target = ["Spanish", "English", "French", "German", "Japanese", "Hindi"]
+    levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
 
-    # --------------------------------------------------------
-    # DO NOT ACCEPT TEXT + AUDIO IN THE SAME TURN
-    # --------------------------------------------------------
+    st.markdown("### Language")
+    settings_native = st.selectbox(
+        "Native language", languages_native,
+        index=languages_native.index(st.session_state.get("native_language", "English")),
+        key="settings_native_language"
+    )
+    settings_target = st.selectbox(
+        "Learning language", languages_target,
+        index=languages_target.index(st.session_state.get("target_language", "Spanish")),
+        key="settings_target_language"
+    )
+    settings_level = st.selectbox(
+        "Proficiency level", levels,
+        index=levels.index(st.session_state.get("proficiency_level", "A1")),
+        key="settings_proficiency_level"
+    )
 
-    if text_input and audio_input is not None:
+    st.markdown("### Practice")
+    settings_daily_goal = st.select_slider(
+        "Daily practice goal (minutes)", options=[5, 10, 15, 20, 30, 45, 60],
+        value=st.session_state.get("daily_goal", 10), key="settings_daily_goal"
+    )
+    settings_session_length = st.selectbox(
+        "Preferred session length", ["5 minutes", "10 minutes", "15 minutes", "20 minutes", "30 minutes"],
+        index=["5 minutes", "10 minutes", "15 minutes", "20 minutes", "30 minutes"].index(
+            st.session_state.get("session_length", "10 minutes")
+        ), key="settings_session_length"
+    )
 
-        st.warning(
-            "Please use either text or voice for one turn."
-        )
-        st.stop()
+    st.markdown("### Coaching")
+    settings_correction = st.radio(
+        "Correction style", ["Gentle", "Balanced", "Detailed"], horizontal=True,
+        index=["Gentle", "Balanced", "Detailed"].index(
+            st.session_state.get("correction_style", "Balanced")
+        ), key="settings_correction_style"
+    )
+    settings_translation = st.toggle(
+        "Show native-language translations",
+        value=st.session_state.get("show_translations", True),
+        key="settings_show_translations"
+    )
+    settings_pronunciation = st.toggle(
+        "Show pronunciation feedback",
+        value=st.session_state.get("pronunciation_feedback", True),
+        key="settings_pronunciation_feedback"
+    )
+    settings_autoplay = st.toggle(
+        "Auto-play Rhet audio when available",
+        value=st.session_state.get("auto_play_audio", True),
+        key="settings_auto_play_audio"
+    )
 
-    # ========================================================
-    # TEXT MODE
-    # ========================================================
+    if st.button("Save settings", use_container_width=True, key="save_settings_page"):
+        st.session_state.native_language = settings_native
+        st.session_state.target_language = settings_target
+        st.session_state.proficiency_level = settings_level
+        st.session_state.daily_goal = settings_daily_goal
+        st.session_state.session_length = settings_session_length
+        st.session_state.correction_style = settings_correction
+        st.session_state.show_translations = settings_translation
+        st.session_state.pronunciation_feedback = settings_pronunciation
+        st.session_state.auto_play_audio = settings_autoplay
+        save_user_settings()
+        st.success("Settings saved locally.")
 
-    elif text_input:
+    if st.button("Back to home", use_container_width=True, key="settings_home"):
+        navigate_to("home")
+        st.rerun()
 
-        # Store learner message
-        st.session_state.messages.append({
-            "role": "user",
-            "content": text_input
-        })
+    st.markdown('</div>', unsafe_allow_html=True)
 
-        try:
-            agent = get_foundry_agent()
+elif st.session_state.page == "signup":
 
-            learner_signal = {
-                "transcript": text_input,
-                "detected_language": native_language,
-                "target_language": target_language,
-                "native_language": native_language,
-                "proficiency_level": proficiency_level,
-                "pronunciation_scores": None,
-                "language_analysis": {},
+    # ── SIGNUP PAGE ─────────────────────────────────────────────────────
+    st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="dash-section-title">Create your local account</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        """<div class="olive-band">
+          <div class="olive-band-text">
+            <div class="olive-band-title">Welcome to parrhet.ai.</div>
+            <div class="olive-band-sub">Create your learner profile. For now, the information stays in this browser's local storage.</div>
+          </div>
+          <div class="olive-band-lang">🦜</div>
+        </div>""",
+        unsafe_allow_html=True
+    )
+
+    with st.form("signup_form", clear_on_submit=False):
+        signup_name = st.text_input("Full name", value="", placeholder="Your name")
+        signup_email = st.text_input("Email", value="", placeholder="you@example.com")
+        st.caption("You can choose your languages and learning preferences later in Settings.")
+        signup_submit = st.form_submit_button("Create account", use_container_width=True)
+
+    if signup_submit:
+        clean_name = signup_name.strip()
+        clean_email = signup_email.strip()
+
+        if not clean_name:
+            st.error("Please enter your name.")
+        elif not clean_email or "@" not in clean_email:
+            st.error("Please enter a valid email address.")
+        else:
+            account = {
+                "id": str(uuid.uuid4()),
+                "name": clean_name,
+                "email": clean_email,
+                "created_at": datetime.now().isoformat(),
             }
 
-            result = agent.generate_tutor_turn(
-                learner_signal
+            if save_user_account(account):
+                navigate_to("profile")
+                st.rerun()
+
+    if st.button("Back to home", use_container_width=True, key="signup_home"):
+        navigate_to("home")
+        st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+elif st.session_state.page == "profile":
+
+    # ── PROFILE PAGE ────────────────────────────────────────────────────
+    account = st.session_state.get("user_account") or {}
+
+    if not account:
+        st.session_state.page = "signup"
+        st.rerun()
+
+    st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="dash-section-title">Your learner profile</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        f"""<div class="olive-band">
+          <div class="olive-band-text">
+            <div class="olive-band-title">Hello, {account.get('name', 'Learner')}.</div>
+            <div class="olive-band-sub">{account.get('email', '')}<br>Your learning preferences are managed in Settings.</div>
+          </div>
+          <div class="olive-band-lang">🦜</div>
+        </div>""",
+        unsafe_allow_html=True
+    )
+
+    st.markdown(f"**Name:** {account.get('name', '')}")
+    st.markdown(f"**Email:** {account.get('email', '')}")
+    st.markdown("**Learning preferences:** Configure your native language, learning language, level, and practice preferences in Settings.")
+
+    if st.button("Sign out", use_container_width=True, key="profile_signout"):
+        clear_user_account()
+        navigate_to("home")
+        st.rerun()
+
+    if st.button("Go to settings", use_container_width=True, key="profile_settings"):
+        navigate_to("settings")
+        st.rerun()
+
+    if st.button("Back to home", use_container_width=True, key="profile_home"):
+        navigate_to("home")
+        st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+else:
+
+    # ── CHAT PAGE ────────────────────────────────────────────────────────
+    st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
+
+    # ── Quick start (shown when no messages) ────────────────────────────
+    if len(st.session_state.messages) == 0:
+        tl_qs = st.session_state.get("target_language", "Spanish")
+        st.markdown(f"""
+        <div class="qs-wrap">
+          <div class="qs-title">Start a conversation</div>
+          <div class="qs-sub">Type or speak in any language. Rhet will respond, coach your pronunciation, and guide the lesson.</div>
+          <div class="qs-row">
+            <span class="qchip">Practice {tl_qs} basics</span>
+            <span class="qchip">Order food in Paris</span>
+            <span class="qchip">Hiragana and Katakana</span>
+            <span class="qchip coral">Explain past tense</span>
+            <span class="qchip coral">Check my pronunciation</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Display messages
+    for message in st.session_state.messages:
+
+        with st.chat_message(message["role"]):
+
+            # ------------------------------------------------
+            # USER MESSAGE
+            # ------------------------------------------------
+            if message["role"] == "user":
+                st.write(message["content"])
+                continue
+
+            # ------------------------------------------------
+            # STRUCTURED RHET RESPONSE
+            # ------------------------------------------------
+            result = message["content"]
+
+            result = normalize_result_language_fields(result)
+
+            # ── Learning-language text
+            learning_text = result.get("learning_language_text", "")
+            if learning_text:
+                st.markdown(
+                    f'<div class="rhet-label">Rhet · {target_language}</div>'
+                    f'<div class="rhet-response">{learning_text}</div>',
+                    unsafe_allow_html=True
+                )
+
+            # ── Native-language translation
+            native_text = result.get("native_language_text", "")
+            if native_text:
+                st.markdown(
+                    f'<div class="translation-text">↳ {native_language}: {native_text}</div>',
+                    unsafe_allow_html=True
+                )
+
+            # ── Transcript / speech-to-text result
+            transcript = result.get("transcript", "")
+
+            if transcript:
+                st.caption(f"🎙️ You said: {transcript}")
+
+            # ── Pronunciation scores
+            scores = result.get("pronunciation_scores")
+
+            if scores:
+                pron = scores.get("pronunciation_score", 0)
+                acc = scores.get("accuracy_score", 0)
+                flu = scores.get("fluency_score", 0)
+                comp = scores.get("completeness_score", 0)
+
+                st.markdown(
+                    f"""
+                    <div class="score-row">
+                      <div class="score-badge">{pron:.0f}<span>Pronunciation</span></div>
+                      <div class="score-badge">{acc:.0f}<span>Accuracy</span></div>
+                      <div class="score-badge">{flu:.0f}<span>Fluency</span></div>
+                      <div class="score-badge">{comp:.0f}<span>Complete</span></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # ── Pronunciation guide
+            pronunciation = result.get("pronunciation", "")
+
+            if pronunciation:
+                st.markdown(
+                    f'<div class="translation-text">🔊 {pronunciation}</div>',
+                    unsafe_allow_html=True
+                )
+
+            # ── Pronunciation audio
+            pronunciation_audio_path = result.get(
+                "pronunciation_audio_path"
             )
 
-            st.session_state.next_target = (
-                result.get(
-                    "suggested_next_target",
-                    ""
-                ) or ""
-            )
+            if (
+                pronunciation_audio_path
+                and os.path.exists(pronunciation_audio_path)
+            ):
+                st.caption("🔊 Listen to Rhet")
+                st.audio(
+                    pronunciation_audio_path,
+                    format="audio/wav"
+                )
 
+            # ── Pedagogical feedback
+            feedback = result.get("pedagogical_feedback", "")
+
+            if feedback:
+                st.markdown(
+                    f'<div class="feedback-box">{feedback}</div>',
+                    unsafe_allow_html=True
+                )
+
+            # ── Practice target
             next_target = result.get(
                 "suggested_next_target",
                 ""
             ) or ""
 
-            target_audio = generate_pronunciation_audio(
-                next_target,
-                target_language
-            )
+            if next_target:
+                st.markdown(
+                    f'<div class="next-target">'
+                    f'<span class="next-target-label">Try&nbsp;saying</span>'
+                    f'{next_target}</div>',
+                    unsafe_allow_html=True
+                )
 
-            result["target_audio_path"] = target_audio
+            # ── Target audio / Listen to it
+            target_audio_path = ensure_target_audio(result, target_language)
 
-            target_text = result.get(
-                "conversational_reply",
-                ""
-            )
+            if target_audio_path and os.path.exists(target_audio_path):
+                st.caption("🔊 Listen to it")
+                st.audio(
+                    target_audio_path,
+                    format="audio/wav"
+                )
 
-            pronunciation_audio = generate_pronunciation_audio(
-                target_text,
-                target_language
-            )
+    st.markdown('</div>', unsafe_allow_html=True)
 
-            result["pronunciation_audio_path"] = (
-                pronunciation_audio
-            )
+    # ============================================================
+    # CHAT INPUT — TEXT + VOICE
+    # ============================================================
 
-            # Store complete Rhet response
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": result
-            })
+    submission = st.chat_input(
+        "Speak or message in any language...",
+        key="chat_input",
+        accept_audio=True,
+        audio_sample_rate=16000,
+        on_submit=mark_chat_submission,
+    )
 
-            # Save AFTER assistant response
-            save_current_conversation()
+    # ============================================================
+    # HANDLE TEXT + VOICE SUBMISSION
+    # ============================================================
 
-        except Exception as e:
+    if submission is not None:
 
-            error_result = {
-                "conversational_reply":
-                    "Sorry, I couldn't process that message.",
-                "translation": "",
-                "pedagogical_feedback": "",
-                "explanation": "",
-                "suggested_next_target": "",
-                "error": str(e),
-            }
+        # The request itself owns the loader now; never show the full-page
+        # navigation overlay during text or voice processing.
+        st.session_state.navigation_loading = False
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_result
-            })
-
-            save_current_conversation()
-
-    # ========================================================
-    # VOICE MODE
-    # ========================================================
-
-    elif audio_input is not None:
-
-        import tempfile
-
-        temp_fd, temp_path = tempfile.mkstemp(
-            suffix=".wav"
+        # --------------------------------------------------------
+        # GET TEXT + AUDIO FROM THE SAME CHAT INPUT
+        # --------------------------------------------------------
+        text_input = (
+            submission.text.strip()
+            if submission.text
+            else ""
         )
-        os.close(temp_fd)
 
-        try:
+        audio_input = submission.audio
 
-            # ------------------------------------------------
-            # SAVE THE BROWSER RECORDING
-            # ------------------------------------------------
+        # Keep the user's existing page behavior:
+        # any actual input means we are in the conversation page.
+        st.session_state.page = "chat"
 
-            with open(temp_path, "wb") as f:
-                f.write(audio_input.getvalue())
+        # --------------------------------------------------------
+        # DO NOT ACCEPT TEXT + AUDIO IN THE SAME TURN
+        # --------------------------------------------------------
+        if text_input and audio_input is not None:
 
-            # ------------------------------------------------
-            # UI LANGUAGE → AZURE SPEECH LOCALE
-            # ------------------------------------------------
-
-            speech_language_codes = {
-                "Spanish": "es-ES",
-                "English": "en-US",
-                "French": "fr-FR",
-                "German": "de-DE",
-                "Japanese": "ja-JP",
-                "Hindi": "hi-IN",
-            }
-
-            speech_language = (
-                speech_language_codes.get(
-                    target_language,
-                    "en-US"
-                )
+            st.warning(
+                "Please use either text or voice for one turn."
             )
+            st.session_state.chat_request_pending = False
+            st.stop()
 
-            # ------------------------------------------------
-            # PREVIOUS RHET SUGGESTION = REFERENCE SENTENCE
-            # ------------------------------------------------
+        # ========================================================
+        # TEXT MODE
+        # ========================================================
 
-            reference_text = (
-                st.session_state.next_target.strip()
-                if st.session_state.next_target
-                else None
-            )
+        elif text_input:
 
-            # ------------------------------------------------
-            # BUILD THE EXISTING BACKEND INPUT
-            # ------------------------------------------------
+            # Store learner message
+            st.session_state.messages.append({
+                "role": "user",
+                "content": text_input
+            })
 
-            turn_input = LearnerTurnInput(
-                user_id="user_123",
-                target_language=speech_language,
-                target_sentence=reference_text,
-                audio_path=temp_path,
-                target_gloss_language="en",
-            )
+            try:
+                # Existing Foundry agent functionality
+                agent = get_foundry_agent()
 
-            # ------------------------------------------------
-            # SEND THE SAME WAV TO YOUR EXISTING PIPELINE
-            # ------------------------------------------------
+                learner_signal = {
+                    "transcript": text_input,
+                    "detected_language": native_language,
+                    "target_language": target_language,
+                    "native_language": native_language,
+                    "proficiency_level": proficiency_level,
+                    "pronunciation_scores": None,
+                    "language_analysis": {},
+                }
 
-            with st.spinner("Listening to you..."):
+                with processing_loader("Rhet is thinking…", "Generating your lesson response"):
+                    result = agent.generate_tutor_turn(
+                        learner_signal
+                    )
 
-                response = (
-                    st.session_state
-                    .orchestrator
-                    .process_turn(turn_input)
+                # Rhet's suggested next target becomes the
+                # reference sentence for the next voice turn.
+                st.session_state.next_target = (
+                    result.get(
+                        "suggested_next_target",
+                        ""
+                    ) or ""
                 )
 
-            # ------------------------------------------------
-            # READ BACKEND RESPONSE
-            # ------------------------------------------------
+                next_target = result.get(
+                    "suggested_next_target",
+                    ""
+                ) or ""
 
-            transcript = getattr(
-                response,
-                "transcript",
-                ""
-            )
+                # Existing Azure Speech TTS functionality:
+                # audio for the suggested practice target.
+                with processing_loader("Preparing pronunciation audio…", "Creating your practice clip"):
+                    target_audio = generate_pronunciation_audio(
+                        next_target,
+                        target_language
+                    )
 
-            pronunciation_scores = getattr(
-                response,
-                "pronunciation_scores",
-                None
-            )
+                result["target_audio_path"] = target_audio
 
-            feedback = getattr(
-                response,
-                "feedback",
-                ""
-            )
+                # Existing Azure Speech TTS functionality:
+                # audio for Rhet's conversational response.
+                target_text = result.get(
+                    "conversational_reply",
+                    ""
+                )
 
-            native_gloss = getattr(
-                response,
-                "native_gloss",
-                ""
-            )
+                with processing_loader("Preparing Rhet audio…", "Getting Rhet's voice ready"):
+                    pronunciation_audio = generate_pronunciation_audio(
+                        target_text,
+                        target_language
+                    )
 
-            next_prompt = getattr(
-                response,
-                "next_prompt",
-                ""
-            )
+                result["pronunciation_audio_path"] = (
+                    pronunciation_audio
+                )
 
-            tutor_audio_path = getattr(
-                response,
-                "tutor_audio_path",
-                None
-            )
-
-            # ------------------------------------------------
-            # STORE LEARNER'S SPOKEN MESSAGE
-            # ------------------------------------------------
-
-            if transcript:
-
+                # Store complete structured response
+                normalize_result_language_fields(result)
                 st.session_state.messages.append({
-                    "role": "user",
-                    "content": f"🎙️ {transcript}"
+                    "role": "assistant",
+                    "content": result
                 })
 
-            # ------------------------------------------------
-            # STORE STRUCTURED RHET RESPONSE
-            # ------------------------------------------------
+                # Persist the complete conversation
+                save_current_conversation()
 
-            assistant_result = {
-                "transcript": transcript,
+            except Exception as e:
 
-                "pronunciation_scores":
-                    pronunciation_scores,
+                error_result = {
+                    "conversational_reply":
+                        "Sorry, I couldn't process that message.",
+                    "translation": "",
+                    "pedagogical_feedback": "",
+                    "explanation": "",
+                    "suggested_next_target": "",
+                    "error": str(e),
+                }
 
-                "pedagogical_feedback":
-                    feedback,
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_result
+                })
 
-                "translation":
-                    native_gloss,
+                save_current_conversation()
 
-                "conversational_reply":
-                    next_prompt,
+        # ========================================================
+        # VOICE MODE
+        # ========================================================
 
-                "suggested_next_target":
-                    next_prompt,
+        elif audio_input is not None:
 
-                "tutor_audio_path":
-                    tutor_audio_path,
-            }
+            import tempfile
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": assistant_result
-            })
-
-            # ------------------------------------------------
-            # NEW TARGET FOR NEXT VOICE TURN
-            # ------------------------------------------------
-
-            st.session_state.next_target = (
-                next_prompt or ""
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix=".wav"
             )
+            os.close(temp_fd)
 
-            save_current_conversation()
+            try:
 
-        except Exception as e:
+                # ------------------------------------------------
+                # SAVE THE BROWSER RECORDING
+                # ------------------------------------------------
+                with open(temp_path, "wb") as f:
+                    f.write(audio_input.getvalue())
 
-            st.error(
-                f"Voice processing failed: {e}"
-            )
+                # ------------------------------------------------
+                # UI LANGUAGE → AZURE SPEECH LOCALE
+                # ------------------------------------------------
+                speech_language_codes = {
+                    "Spanish": "es-ES",
+                    "English": "en-US",
+                    "French": "fr-FR",
+                    "German": "de-DE",
+                    "Japanese": "ja-JP",
+                    "Hindi": "hi-IN",
+                }
 
-        finally:
+                speech_language = (
+                    speech_language_codes.get(
+                        target_language,
+                        "en-US"
+                    )
+                )
 
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+                # ------------------------------------------------
+                # PREVIOUS RHET SUGGESTION =
+                # REFERENCE SENTENCE FOR PRONUNCIATION
+                # ------------------------------------------------
+                reference_text = (
+                    st.session_state.next_target.strip()
+                    if st.session_state.next_target
+                    else None
+                )
 
-    # --------------------------------------------------------
-    # RE-RENDER CHAT ONCE
-    # --------------------------------------------------------
+                # ------------------------------------------------
+                # BUILD EXISTING BACKEND INPUT
+                # ------------------------------------------------
+                turn_input = LearnerTurnInput(
+                    user_id="user_123",
+                    target_language=speech_language,
+                    target_sentence=reference_text,
+                    audio_path=temp_path,
+                    target_gloss_language="en",
+                )
 
-    st.rerun()
+                # ------------------------------------------------
+                # SEND THE SAME WAV TO THE EXISTING ORCHESTRATOR
+                # ------------------------------------------------
+                with processing_loader("Rhet is analyzing your speech…", "Checking your pronunciation and response"):
+                    response = (
+                        st.session_state
+                        .orchestrator
+                        .process_turn(turn_input)
+                    )
+
+                # ------------------------------------------------
+                # READ BACKEND RESPONSE
+                # ------------------------------------------------
+                transcript = getattr(
+                    response,
+                    "transcript",
+                    ""
+                )
+
+                pronunciation_scores = getattr(
+                    response,
+                    "pronunciation_scores",
+                    None
+                )
+
+                feedback = getattr(
+                    response,
+                    "feedback",
+                    ""
+                )
+
+                native_gloss = getattr(
+                    response,
+                    "native_gloss",
+                    ""
+                )
+
+                next_prompt = getattr(
+                    response,
+                    "next_prompt",
+                    ""
+                )
+
+                tutor_audio_path = getattr(
+                    response,
+                    "tutor_audio_path",
+                    None
+                )
+
+                learning_response_text = (next_prompt or "").strip()
+                native_response_text = (native_gloss or "").strip()
+
+                # Every voice response gets a playable practice-target clip.
+                if learning_response_text:
+                    with processing_loader("Preparing your pronunciation example…", "Creating the sentence for you to repeat"):
+                        target_audio_path = generate_pronunciation_audio(
+                            learning_response_text,
+                            target_language
+                        )
+                else:
+                    target_audio_path = None
+
+                # ------------------------------------------------
+                # STORE LEARNER'S SPOKEN MESSAGE
+                # ------------------------------------------------
+                if transcript:
+
+                    st.session_state.messages.append({
+                        "role": "user",
+                        "content": f"🎙️ {transcript}"
+                    })
+
+                # ------------------------------------------------
+                # STORE STRUCTURED RHET RESPONSE
+                # ------------------------------------------------
+                assistant_result = {
+                    "transcript": transcript,
+                    "pronunciation_scores":
+                        pronunciation_scores,
+                    "pedagogical_feedback":
+                        feedback,
+                    "translation":
+                        native_gloss,
+                    "native_gloss":
+                        native_gloss,
+                    "learning_language_text":
+                        learning_response_text,
+                    "native_language_text":
+                        native_response_text,
+                    "conversational_reply":
+                        next_prompt,
+                    "suggested_next_target":
+                        next_prompt,
+                    "tutor_audio_path":
+                        tutor_audio_path,
+                    "target_audio_path":
+                        target_audio_path,
+                }
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": assistant_result
+                })
+
+                # ------------------------------------------------
+                # NEW TARGET FOR THE NEXT VOICE TURN
+                # ------------------------------------------------
+                st.session_state.next_target = (
+                    next_prompt or ""
+                )
+
+                save_current_conversation()
+
+            except Exception as e:
+
+                st.error(
+                    f"Voice processing failed: {e}"
+                )
+
+            finally:
+
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+        # Re-render exactly once after processing the turn.
+        st.session_state.chat_request_pending = False
+        st.rerun()
