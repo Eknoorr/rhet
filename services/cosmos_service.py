@@ -72,6 +72,28 @@ class CosmosService:
         except CosmosResourceNotFoundError:
             return None
 
+    def get_user_by_email(self, email):
+            query = """
+            SELECT TOP 1 *
+            FROM c
+            WHERE LOWER(c.email) = @email
+            """
+    
+            results = list(
+                self.users.query_items(
+                    query=query,
+                    parameters=[
+                        {
+                            "name": "@email",
+                            "value": email.strip().lower()
+                        }
+                    ],
+                    enable_cross_partition_query=True
+                )
+            )
+    
+            return results[0] if results else None
+
     # ========================================================
     # CONVERSATIONS
     # ========================================================
@@ -120,10 +142,10 @@ class CosmosService:
                         "value": user_id
                     }
                 ],
-                partition_key=user_id
+                enable_cross_partition_query=True
             )
         )
-
+    
     # ========================================================
     # PROGRESS
     # ========================================================

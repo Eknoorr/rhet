@@ -369,23 +369,31 @@ def load_user_conversations():
     user_id = user_account.get("user_id")
 
     if not user_id:
+        st.warning("DEBUG: No user_id in current session.")
         return []
 
     try:
-        conversations = (
-            st.session_state.cosmos
-            .get_user_conversations(user_id)
+        conversations = st.session_state.cosmos.get_user_conversations(
+            user_id
         )
 
         conversations = list(conversations or [])
 
-        # Newest first
+        # TEMP DEBUG
+        st.write("DEBUG — current user_id:", user_id)
+        st.write("DEBUG — conversations returned:", len(conversations))
+
+        if conversations:
+            st.write(
+                "DEBUG — conversation user_ids:",
+                [c.get("user_id") for c in conversations]
+            )
+
         conversations.sort(
             key=lambda item: item.get("updated_at", ""),
             reverse=True
         )
 
-        # Keep the same UI limit
         conversations = conversations[:20]
 
         st.session_state.chat_history = conversations
@@ -393,11 +401,32 @@ def load_user_conversations():
         return conversations
 
     except Exception as e:
-        st.warning(
-            f"Could not load conversations from Cosmos DB: {e}"
+        st.error(
+            f"DEBUG — Cosmos conversation retrieval failed: {e}"
         )
         return []
+def load_conversation_from_cosmos(conversation_id):
+    """Retrieve one complete conversation from Cosmos DB."""
+    user_account = st.session_state.get("user_account") or {}
+    user_id = user_account.get("user_id")
 
+    if not user_id or not conversation_id:
+        return None
+
+    try:
+        conversation = st.session_state.cosmos.get_conversation(
+            conversation_id,
+            user_id
+        )
+
+        return conversation
+
+    except Exception as e:
+        st.warning(
+            f"Could not retrieve conversation from Cosmos DB: {e}"
+        )
+        return None
+    
 def save_current_conversation():
     """
     Save the current chat to:
@@ -755,6 +784,13 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
 
             load_user_conversations()
 
+            st.write(
+                "DEBUG:",
+                st.session_state.user_account.get("user_id"),
+                "conversations:",
+                len(st.session_state.get("chat_history", []))
+            )
+
             # ----------------------------------------------------
             # LOAD PROGRESS
             # ----------------------------------------------------
@@ -885,33 +921,51 @@ def save_user_account(account):
         return False
 
 def sign_in_user(email):
-    """Authenticate against the single locally stored demo account."""
-    stored = st.session_state.get("account_storage_record") or {}
-    stored_email = str(stored.get("email", "")).strip().lower()
+    """Sign in by retrieving the user account from Cosmos DB."""
 
-    if not stored_email:
-        return False, "No local account exists in this browser yet. Please create an account first."
+    email = email.strip().lower()
 
-    if email.strip().lower() != stored_email:
-        return False, "That email does not match the local account saved in this browser."
-
-    record = dict(stored)
-    record["authenticated"] = True
+    if not email:
+        return False, "Please enter your email."
 
     try:
-        local_storage.setItem(
-            ACCOUNT_KEY,
-            json.dumps(record, ensure_ascii=False)
+        # Find the real account in Cosmos
+        cosmos_user = st.session_state.cosmos.get_user_by_email(email)
+
+        if not cosmos_user:
+            return False, "No account exists with this email."
+
+        # IMPORTANT:
+        # Use the user_id stored in Cosmos, NOT a browser-generated ID.
+        record = {
+            "id": cosmos_user["id"],
+            "user_id": cosmos_user["user_id"],
+            "name": cosmos_user.get("name", ""),
+            "email": cosmos_user.get("email", ""),
+            "created_at": cosmos_user.get("created_at"),
+            "authenticated": True,
+        }
+
+        # Put the Cosmos identity into this Streamlit session
+        st.session_state.user_account = record
+        st.session_state.account_storage_record = record
+
+        # Force Cosmos data to reload for this user
+        st.session_state.pop(
+            "cosmos_user_data_loaded",
+            None
         )
-        time.sleep(0.45)
+
+        # Clear stale browser/session conversation state
+        st.session_state.chat_history = []
+        st.session_state.messages = []
+        st.session_state.pending_history_restore = None
+
+        return True, ""
+
     except Exception as e:
-        return False, f"Could not save sign-in state: {e}"
-
-    st.session_state.account_storage_record = record
-    st.session_state.user_account = record
-    return True, ""
-
-
+        return False, f"Could not sign in: {e}"
+    
 def sign_out_user():
     """Sign out without deleting the locally stored account."""
     stored = st.session_state.get("account_storage_record") or {}
@@ -2281,7 +2335,20 @@ with st.sidebar:
                 if not st.session_state.user_account:
                     navigate_to("signup")
                 else:
-                    navigate_to("chat", pending_history=item)
+                    conversation = load_conversation_from_cosmos(
+                        conversation_id
+                    )
+
+                    if conversation:
+                        navigate_to(
+                            "chat",
+                            pending_history=conversation
+                        )
+                    else:
+                        st.warning(
+                            "Could not load this conversation from Cosmos DB."
+                        )
+
                 st.rerun()
 
     # ── Account ───────────────────────────────────────────────────────────
