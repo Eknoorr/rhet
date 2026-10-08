@@ -1,4 +1,4 @@
-﻿from typing import Tuple
+from typing import Tuple
 
 BLOCKED_TOPICS = ["politics", "violence", "hate speech", "malicious code"]
 

@@ -1,8 +1,10 @@
-﻿import os
+import os
 from dotenv import load_dotenv
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.textanalytics import TextAnalyticsClient
 from azure.ai.translation.text import TextTranslationClient
+
+from services.logger import rhet_log
 
 load_dotenv()
 
@@ -54,7 +56,7 @@ class LanguageAnalysisService:
                 detected_lang = lang_res.primary_language.iso6391_name
                 confidence_score = lang_res.primary_language.confidence_score
         except Exception as e:
-            print(f"Language detection warning: {e}")
+            rhet_log.warning("Language detection failed: %s", e, exc_info=True)
 
         # 2. Extract Key Phrases
         key_phrases = []
@@ -66,7 +68,7 @@ class LanguageAnalysisService:
             if not phrase_res.is_error:
                 key_phrases = list(phrase_res.key_phrases)
         except Exception as e:
-            print(f"Key phrase extraction warning: {e}")
+            rhet_log.warning("Key phrase extraction failed: %s", e, exc_info=True)
 
         # 3. Recognize Named Entities
         entities = []
@@ -86,7 +88,7 @@ class LanguageAnalysisService:
                     for entity in entity_res.entities
                 ]
         except Exception as e:
-            print(f"Entity recognition warning: {e}")
+            rhet_log.warning("Entity recognition failed: %s", e, exc_info=True)
 
         # 4. Generate Native-Language Gloss (Translation)
         gloss_translation = ""
@@ -99,7 +101,7 @@ class LanguageAnalysisService:
             if trans_res and trans_res[0].translations:
                 gloss_translation = trans_res[0].translations[0].text
         except Exception as e:
-            print(f"Gloss translation warning: {e}")
+            rhet_log.warning("Gloss translation failed: %s", e, exc_info=True)
 
         return {
             "success": True,

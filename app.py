@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import uuid
 import time
@@ -12,6 +12,7 @@ from services.foundry_agent import FoundryAgentClient
 from services.orchestrator import MasterOrchestrator
 from models.p3_schemas import LearnerTurnInput
 from services.cosmos_service import CosmosService
+from services.logger import rhet_log
 # ============================================================
 # PAGE SETUP
 # ============================================================
@@ -35,7 +36,11 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "orchestrator" not in st.session_state:
-    st.session_state.orchestrator = MasterOrchestrator()
+    try:
+        st.session_state.orchestrator = MasterOrchestrator()
+    except Exception as _orch_err:
+        st.session_state.orchestrator = None
+        st.session_state._orchestrator_error = str(_orch_err)
 
 if "next_target" not in st.session_state:
     st.session_state.next_target = ""
@@ -53,7 +58,11 @@ if "chat_request_pending" not in st.session_state:
     st.session_state.chat_request_pending = False
 
 if "cosmos" not in st.session_state:
-    st.session_state.cosmos = CosmosService()
+    try:
+        st.session_state.cosmos = CosmosService()
+    except Exception as _cosmos_err:
+        st.session_state.cosmos = None
+        st.session_state._cosmos_error = str(_cosmos_err)
 
 if "progress_session_counted" not in st.session_state:
     st.session_state.progress_session_counted = False
@@ -178,9 +187,7 @@ def save_history_to_local_storage():
             )
         )
     except Exception as e:
-        st.warning(
-            f"Could not save conversation history: {e}"
-        )
+        rhet_log.error("save_history_to_local_storage failed: %s", e, exc_info=True)
 
 
 def get_history_title(messages):
@@ -254,6 +261,9 @@ def load_user_progress():
     if not user_id:
         return None
 
+    if not st.session_state.cosmos:
+        return None
+
     try:
         progress = st.session_state.cosmos.get_progress(user_id)
 
@@ -263,7 +273,7 @@ def load_user_progress():
         return progress
 
     except Exception as e:
-        st.warning(f"Could not load progress: {e}")
+        rhet_log.error("load_user_progress failed: %s", e, exc_info=True)
         return None
 
 def update_user_progress():
@@ -283,6 +293,9 @@ def update_user_progress():
     messages = st.session_state.get("messages", [])
 
     if not messages:
+        return
+
+    if not st.session_state.cosmos:
         return
 
     try:
@@ -358,9 +371,7 @@ def update_user_progress():
         st.session_state.cosmos.save_progress(progress)
 
     except Exception as e:
-        st.warning(
-            f"Progress could not be saved to Cosmos DB: {e}"
-        )
+        rhet_log.error("update_user_progress failed: %s", e, exc_info=True)
 
 def load_user_conversations():
     """Load the current user's conversations from Cosmos DB."""
@@ -369,7 +380,9 @@ def load_user_conversations():
     user_id = user_account.get("user_id")
 
     if not user_id:
-        st.warning("DEBUG: No user_id in current session.")
+        return []
+
+    if not st.session_state.cosmos:
         return []
 
     try:
@@ -378,16 +391,6 @@ def load_user_conversations():
         )
 
         conversations = list(conversations or [])
-
-        # TEMP DEBUG
-        st.write("DEBUG — current user_id:", user_id)
-        st.write("DEBUG — conversations returned:", len(conversations))
-
-        if conversations:
-            st.write(
-                "DEBUG — conversation user_ids:",
-                [c.get("user_id") for c in conversations]
-            )
 
         conversations.sort(
             key=lambda item: item.get("updated_at", ""),
@@ -401,9 +404,7 @@ def load_user_conversations():
         return conversations
 
     except Exception as e:
-        st.error(
-            f"DEBUG — Cosmos conversation retrieval failed: {e}"
-        )
+        rhet_log.error("load_user_conversations failed: %s", e, exc_info=True)
         return []
 def load_conversation_from_cosmos(conversation_id):
     """Retrieve one complete conversation from Cosmos DB."""
@@ -411,6 +412,9 @@ def load_conversation_from_cosmos(conversation_id):
     user_id = user_account.get("user_id")
 
     if not user_id or not conversation_id:
+        return None
+
+    if not st.session_state.cosmos:
         return None
 
     try:
@@ -422,9 +426,7 @@ def load_conversation_from_cosmos(conversation_id):
         return conversation
 
     except Exception as e:
-        st.warning(
-            f"Could not retrieve conversation from Cosmos DB: {e}"
-        )
+        rhet_log.error("load_conversation_from_cosmos failed: %s", e, exc_info=True)
         return None
     
 def save_current_conversation():
@@ -446,9 +448,7 @@ def save_current_conversation():
 
     # We need a stable user ID before writing to Cosmos.
     if not user_id:
-        st.warning(
-            "No user ID found. Conversation could not be saved to Cosmos DB."
-        )
+        rhet_log.warning("save_current_conversation: no user_id in session, skipping Cosmos save.")
         return
 
     conversation_id = st.session_state.get("conversation_id")
@@ -521,15 +521,14 @@ def save_current_conversation():
     # SAVE TO COSMOS DB
     # ========================================================
 
-    try:
-        st.session_state.cosmos.save_conversation(
-            history_entry
-        )
+    if st.session_state.cosmos:
+        try:
+            st.session_state.cosmos.save_conversation(
+                history_entry
+            )
 
-    except Exception as e:
-        st.warning(
-            f"Conversation saved locally, but Cosmos DB save failed: {e}"
-        )
+        except Exception as e:
+            rhet_log.error("save_current_conversation Cosmos save failed: %s", e, exc_info=True)
 
     # ========================================================
     # UPDATE LEARNING PROGRESS
@@ -585,9 +584,7 @@ def generate_pronunciation_audio(text, language):
             return temp_path
 
     except Exception as e:
-        st.warning(
-            f"Could not generate pronunciation audio: {e}"
-        )
+        rhet_log.error("generate_pronunciation_audio failed: %s", e, exc_info=True)
 
     return None
 
@@ -712,6 +709,7 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
 
     if (
         st.session_state.get("user_account")
+        and st.session_state.cosmos
         and "cosmos_user_data_loaded" not in st.session_state
     ):
 
@@ -774,8 +772,8 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
                             )
 
             except Exception as e:
-                st.warning(
-                    f"Could not load user profile from Cosmos DB: {e}"
+                rhet_log.error(
+                    "cosmos_user_data_loaded: user profile load failed: %s", e, exc_info=True
                 )
 
             # ----------------------------------------------------
@@ -783,13 +781,6 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
             # ----------------------------------------------------
 
             load_user_conversations()
-
-            st.write(
-                "DEBUG:",
-                st.session_state.user_account.get("user_id"),
-                "conversations:",
-                len(st.session_state.get("chat_history", []))
-            )
 
             # ----------------------------------------------------
             # LOAD PROGRESS
@@ -808,8 +799,8 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
                 )
 
             except Exception as e:
-                st.warning(
-                    f"Could not load progress from Cosmos DB: {e}"
+                rhet_log.error(
+                    "cosmos_user_data_loaded: progress load failed: %s", e, exc_info=True
                 )
 
         st.session_state.cosmos_user_data_loaded = True
@@ -844,65 +835,74 @@ def save_user_account(account):
     st.session_state.user_account = record
     st.session_state.account_storage_record = record
 
+    # New account — start with a clean slate so the previous
+    # browser user's conversations don't appear in the sidebar.
+    st.session_state.chat_history = []
+    st.session_state.messages = []
+    st.session_state.pop("cosmos_user_data_loaded", None)
+    try:
+        local_storage.setItem(HISTORY_KEY, json.dumps([], ensure_ascii=False))
+    except Exception:
+        pass
+
     # ========================================================
     # SAVE USER PROFILE TO COSMOS
     # ========================================================
 
-    try:
-        user_document = {
-            "id": record["user_id"],
-            "user_id": record["user_id"],
-            "name": record.get("name", ""),
-            "email": record.get("email", ""),
-            "created_at": record.get(
-                "created_at",
-                datetime.now().isoformat()
-            ),
+    if st.session_state.cosmos:
+        try:
+            user_document = {
+                "id": record["user_id"],
+                "user_id": record["user_id"],
+                "name": record.get("name", ""),
+                "email": record.get("email", ""),
+                "created_at": record.get(
+                    "created_at",
+                    datetime.now().isoformat()
+                ),
 
-            "native_language": st.session_state.get(
-                "native_language",
-                "English"
-            ),
-            "target_language": st.session_state.get(
-                "target_language",
-                "Spanish"
-            ),
-            "proficiency_level": st.session_state.get(
-                "proficiency_level",
-                "A1"
-            ),
-            "daily_goal": st.session_state.get(
-                "daily_goal",
-                10
-            ),
-            "session_length": st.session_state.get(
-                "session_length",
-                "10 minutes"
-            ),
-            "correction_style": st.session_state.get(
-                "correction_style",
-                "Balanced"
-            ),
-            "show_translations": st.session_state.get(
-                "show_translations",
-                True
-            ),
-            "pronunciation_feedback": st.session_state.get(
-                "pronunciation_feedback",
-                True
-            ),
-            "auto_play_audio": st.session_state.get(
-                "auto_play_audio",
-                True
-            )
-        }
+                "native_language": st.session_state.get(
+                    "native_language",
+                    "English"
+                ),
+                "target_language": st.session_state.get(
+                    "target_language",
+                    "Spanish"
+                ),
+                "proficiency_level": st.session_state.get(
+                    "proficiency_level",
+                    "A1"
+                ),
+                "daily_goal": st.session_state.get(
+                    "daily_goal",
+                    10
+                ),
+                "session_length": st.session_state.get(
+                    "session_length",
+                    "10 minutes"
+                ),
+                "correction_style": st.session_state.get(
+                    "correction_style",
+                    "Balanced"
+                ),
+                "show_translations": st.session_state.get(
+                    "show_translations",
+                    True
+                ),
+                "pronunciation_feedback": st.session_state.get(
+                    "pronunciation_feedback",
+                    True
+                ),
+                "auto_play_audio": st.session_state.get(
+                    "auto_play_audio",
+                    True
+                )
+            }
 
-        st.session_state.cosmos.save_user(user_document)
+            st.session_state.cosmos.save_user(user_document)
 
-    except Exception as e:
-        st.warning(
-            f"Account created locally, but Cosmos user save failed: {e}"
-        )
+        except Exception as e:
+            rhet_log.error("save_user_account Cosmos user save failed: %s", e, exc_info=True)
 
     # ========================================================
     # SAVE LOCAL ACCOUNT
@@ -917,7 +917,7 @@ def save_user_account(account):
         return True
 
     except Exception as e:
-        st.warning(f"Could not save account information: {e}")
+        rhet_log.error("save_user_account localStorage save failed: %s", e, exc_info=True)
         return False
 
 def sign_in_user(email):
@@ -927,6 +927,10 @@ def sign_in_user(email):
 
     if not email:
         return False, "Please enter your email."
+
+    if not st.session_state.cosmos:
+        reason = st.session_state.get("_cosmos_error", "COSMOS_ENDPOINT is not set in .env")
+        return False, f"Cosmos DB is not available ({reason}). Add your credentials to .env and restart."
 
     try:
         # Find the real account in Cosmos
@@ -956,10 +960,36 @@ def sign_in_user(email):
             None
         )
 
-        # Clear stale browser/session conversation state
+        # Clear stale browser/session conversation state.
+        # Also clear localStorage so the previous account's conversations
+        # don't reappear on the next browser refresh before Cosmos loads.
         st.session_state.chat_history = []
         st.session_state.messages = []
         st.session_state.pending_history_restore = None
+
+        try:
+            local_storage.setItem(
+                HISTORY_KEY,
+                json.dumps([], ensure_ascii=False)
+            )
+        except Exception:
+            pass
+
+        # Immediately load this user's conversations from Cosmos
+        # so the sidebar populates before the next rerun.
+        if st.session_state.cosmos:
+            try:
+                convos = st.session_state.cosmos.get_user_conversations(
+                    record["user_id"]
+                )
+                convos = sorted(
+                    list(convos or []),
+                    key=lambda c: c.get("updated_at", ""),
+                    reverse=True,
+                )
+                st.session_state.chat_history = convos[:20]
+            except Exception:
+                pass
 
         return True, ""
 
@@ -980,7 +1010,7 @@ def sign_out_user():
             time.sleep(0.3)
             st.session_state.account_storage_record = record
         except Exception as e:
-            st.warning(f"Could not save sign-out state: {e}")
+            rhet_log.error("sign_out_user localStorage save failed: %s", e, exc_info=True)
     st.session_state.user_account = None
 
 
@@ -994,7 +1024,7 @@ def clear_user_account():
         try:
             local_storage.setItem(ACCOUNT_KEY, json.dumps({}))
         except Exception as e:
-            st.warning(f"Could not clear account information: {e}")
+            rhet_log.error("clear_user_account localStorage clear failed: %s", e, exc_info=True)
 
 
 def get_user_display_name():
@@ -2162,6 +2192,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
+# ============================================================
+# STARTUP WARNINGS — missing credentials
+# ============================================================
+if st.session_state.get("_cosmos_error"):
+    st.warning(
+        f"⚠️ Cosmos DB unavailable: {st.session_state._cosmos_error} — "
+        "add COSMOS_ENDPOINT to your .env and restart."
+    )
+if st.session_state.get("_orchestrator_error"):
+    st.warning(
+        f"⚠️ Orchestrator unavailable: {st.session_state._orchestrator_error} — "
+        "add your Azure credentials to .env and restart."
+    )
+
+# ============================================================
 # PAGE TRANSITION LOADER
 # ============================================================
 if (
@@ -2227,7 +2272,10 @@ if st.session_state.pending_history_restore is not None:
     st.session_state.next_target = ""
 
     # Fresh orchestrator
-    st.session_state.orchestrator = MasterOrchestrator()
+    try:
+        st.session_state.orchestrator = MasterOrchestrator()
+    except Exception as _e:
+        st.session_state.orchestrator = None
 
     # Consume the pending restore
     st.session_state.pending_history_restore = None
@@ -2279,7 +2327,10 @@ with st.sidebar:
             save_current_conversation()
 
             st.session_state.messages = []
-            st.session_state.orchestrator = MasterOrchestrator()
+            try:
+                st.session_state.orchestrator = MasterOrchestrator()
+            except Exception as _e:
+                st.session_state.orchestrator = None
             st.session_state.next_target = ""
             st.session_state.conversation_id = str(uuid.uuid4())
 
@@ -2317,7 +2368,13 @@ with st.sidebar:
     # ── Recent ────────────────────────────────────────────────────────────
     st.markdown('<div class="sb-label">Recent</div>', unsafe_allow_html=True)
 
-    if not st.session_state.chat_history:
+    if not st.session_state.user_account:
+        st.markdown(
+            '<div class="sb-card"><div class="sb-card-title">Sign in to see your history</div>'
+            '<div class="sb-card-meta">Your conversations are saved per account</div></div>',
+            unsafe_allow_html=True
+        )
+    elif not st.session_state.chat_history:
         st.markdown(
             '<div class="sb-card"><div class="sb-card-title">No conversations yet</div>'
             '<div class="sb-card-meta">Start chatting to build your history</div></div>',
@@ -2333,7 +2390,7 @@ with st.sidebar:
                 use_container_width=True
             ):
                 if not st.session_state.user_account:
-                    navigate_to("signup")
+                    navigate_to("signin")
                 else:
                     conversation = load_conversation_from_cosmos(
                         conversation_id
@@ -2345,8 +2402,8 @@ with st.sidebar:
                             pending_history=conversation
                         )
                     else:
-                        st.warning(
-                            "Could not load this conversation from Cosmos DB."
+                        rhet_log.warning(
+                            "Conversation %s not found in Cosmos DB.", conversation_id
                         )
 
                 st.rerun()
@@ -2359,17 +2416,12 @@ with st.sidebar:
             navigate_to("profile")
             st.rerun()
     else:
-        if st.session_state.get("account_storage_record"):
-            if st.button("Sign in", use_container_width=True, key="account_signin"):
-                navigate_to("signin")
-                st.rerun()
-            if st.button("Sign up", use_container_width=True, key="account_signup"):
-                navigate_to("signup")
-                st.rerun()
-        else:
-            if st.button("Sign up", use_container_width=True, key="account_signup"):
-                navigate_to("signup")
-                st.rerun()
+        if st.button("Sign in", use_container_width=True, key="account_signin"):
+            navigate_to("signin")
+            st.rerun()
+        if st.button("Sign up", use_container_width=True, key="account_signup"):
+            navigate_to("signup")
+            st.rerun()
 
     if st.button("Settings", use_container_width=True, key="account_settings"):
         navigate_to("settings")
@@ -2680,12 +2732,6 @@ elif st.session_state.page == "signup":
                 navigate_to("profile")
                 st.rerun()
 
-    if st.session_state.get("account_storage_record"):
-        st.info("A local account already exists in this browser. Sign in instead, or create a different local account from the Sign in page.")
-        if st.button("Go to sign in", use_container_width=True, key="signup_to_signin"):
-            navigate_to("signin")
-            st.rerun()
-
     if st.button("Back to home", use_container_width=True, key="signup_home"):
         navigate_to("home")
         st.rerun()
@@ -2939,40 +2985,63 @@ else:
             })
 
             try:
-                # Existing Foundry agent functionality
-                agent = get_foundry_agent()
+                # Route text turns through MasterOrchestrator so they
+                # go through the same guardrails and agent path as voice.
+                if not st.session_state.orchestrator:
+                    raise RuntimeError(
+                        "The orchestrator failed to initialise. "
+                        "Please check your Azure credentials in .env."
+                    )
 
-                learner_signal = {
-                    "transcript": text_input,
-                    "detected_language": native_language,
-                    "target_language": target_language,
-                    "native_language": native_language,
-                    "proficiency_level": proficiency_level,
-                    "pronunciation_scores": None,
-                    "language_analysis": {},
+                _user_account = st.session_state.get("user_account") or {}
+                _user_id = _user_account.get("user_id") or "anonymous"
+
+                speech_language_codes = {
+                    "Spanish": "es-ES",
+                    "English": "en-US",
+                    "French": "fr-FR",
+                    "German": "de-DE",
+                    "Japanese": "ja-JP",
+                    "Hindi": "hi-IN",
                 }
+                speech_language = speech_language_codes.get(
+                    target_language, "en-US"
+                )
+
+                text_turn_input = LearnerTurnInput(
+                    user_id=_user_id,
+                    target_language=speech_language,
+                    raw_text_input=text_input,
+                    target_gloss_language="en",
+                    native_language=native_language,
+                    proficiency_level=proficiency_level,
+                )
 
                 with processing_loader("Rhet is thinking…", "Generating your lesson response"):
-                    result = agent.generate_tutor_turn(
-                        learner_signal
+                    orch_response = st.session_state.orchestrator.process_turn(
+                        text_turn_input
                     )
+
+                # Unpack TutorTurnResponse into the same result dict
+                # shape that the rest of the UI expects.
+                result = {
+                    "conversational_reply": orch_response.next_prompt or "",
+                    "pronunciation": "",
+                    "translation": orch_response.native_gloss or "",
+                    "pedagogical_feedback": orch_response.feedback or "",
+                    "explanation": "",
+                    "suggested_next_target": orch_response.next_prompt or "",
+                }
 
                 # Rhet's suggested next target becomes the
                 # reference sentence for the next voice turn.
                 st.session_state.next_target = (
-                    result.get(
-                        "suggested_next_target",
-                        ""
-                    ) or ""
+                    result.get("suggested_next_target", "") or ""
                 )
 
-                next_target = result.get(
-                    "suggested_next_target",
-                    ""
-                ) or ""
+                next_target = result.get("suggested_next_target", "") or ""
 
-                # Existing Azure Speech TTS functionality:
-                # audio for the suggested practice target.
+                # Audio for the suggested practice target.
                 with processing_loader("Preparing pronunciation audio…", "Creating your practice clip"):
                     target_audio = generate_pronunciation_audio(
                         next_target,
@@ -2981,12 +3050,8 @@ else:
 
                 result["target_audio_path"] = target_audio
 
-                # Existing Azure Speech TTS functionality:
-                # audio for Rhet's conversational response.
-                target_text = result.get(
-                    "conversational_reply",
-                    ""
-                )
+                # Audio for Rhet's conversational response.
+                target_text = result.get("conversational_reply", "")
 
                 with processing_loader("Preparing Rhet audio…", "Getting Rhet's voice ready"):
                     pronunciation_audio = generate_pronunciation_audio(
@@ -2994,9 +3059,7 @@ else:
                         target_language
                     )
 
-                result["pronunciation_audio_path"] = (
-                    pronunciation_audio
-                )
+                result["pronunciation_audio_path"] = pronunciation_audio
 
                 # Store complete structured response
                 normalize_result_language_fields(result)
@@ -3080,17 +3143,28 @@ else:
                 # ------------------------------------------------
                 # BUILD EXISTING BACKEND INPUT
                 # ------------------------------------------------
+                _user_account = st.session_state.get("user_account") or {}
+                _user_id = _user_account.get("user_id") or "anonymous"
+
                 turn_input = LearnerTurnInput(
-                    user_id="user_123",
+                    user_id=_user_id,
                     target_language=speech_language,
                     target_sentence=reference_text,
                     audio_path=temp_path,
                     target_gloss_language="en",
+                    native_language=native_language,
+                    proficiency_level=proficiency_level,
                 )
 
                 # ------------------------------------------------
                 # SEND THE SAME WAV TO THE EXISTING ORCHESTRATOR
                 # ------------------------------------------------
+                if not st.session_state.orchestrator:
+                    raise RuntimeError(
+                        "The orchestrator failed to initialise. "
+                        "Please check your Azure credentials in .env."
+                    )
+
                 with processing_loader("Rhet is analyzing your speech…", "Checking your pronunciation and response"):
                     response = (
                         st.session_state
@@ -3202,10 +3276,8 @@ else:
                 save_current_conversation()
 
             except Exception as e:
-
-                st.error(
-                    f"Voice processing failed: {e}"
-                )
+                rhet_log.error("Voice turn processing failed: %s", e, exc_info=True)
+                st.error("Something went wrong with your voice message. Please try again.")
 
             finally:
 
@@ -3215,3 +3287,4 @@ else:
         # Re-render exactly once after processing the turn.
         st.session_state.chat_request_pending = False
         st.rerun()
+
