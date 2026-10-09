@@ -132,45 +132,6 @@ class FoundryAgentClient:
             )
             return self._fallback_response(structured_signal)
 
-    def chat(self, user_message: str) -> dict:
-        """
-        Send a text message to the Rhet agent and return a structured
-        tutor response.  Used by MasterOrchestrator for text-mode turns.
-        """
-
-        if not user_message or not user_message.strip():
-            raise ValueError("User message cannot be empty.")
-
-        if self._fallback_mode:
-            return self._fallback_response({"transcript": user_message})
-
-        try:
-            response = self.client.responses.create(
-                conversation=self.conversation.id,
-                input=user_message.strip(),
-            )
-
-            content = response.output_text
-
-            try:
-                return json.loads(content)
-            except json.JSONDecodeError:
-                rhet_log.warning(
-                    "chat: agent returned non-JSON — using raw text as reply."
-                )
-                return {
-                    "conversational_reply": content,
-                    "pronunciation": "",
-                    "translation": "",
-                    "pedagogical_feedback": "",
-                    "explanation": "",
-                    "suggested_next_target": "",
-                }
-
-        except Exception as e:
-            rhet_log.error("chat failed: %s", e, exc_info=True)
-            return self._fallback_response({"transcript": user_message})
-
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
