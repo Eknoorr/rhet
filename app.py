@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -13,6 +14,12 @@ from services.orchestrator import MasterOrchestrator
 from models.p3_schemas import LearnerTurnInput
 from services.cosmos_service import CosmosService
 from services.logger import rhet_log
+from services.auth_service import (
+    generate_otp,
+    otp_expiry,
+    send_otp_email,
+    verify_otp,
+)
 # ============================================================
 # PAGE SETUP
 # ============================================================
@@ -26,8 +33,69 @@ st.set_page_config(
 
 # ============================================================
 # SESSION STATE
-# ==========================
-# ==================================
+# ============================================================
+#
+# Key registry — every key used across the app, with its type and purpose:
+#
+# Core navigation
+#   page                    str    current page name: home|chat|settings|profile|signup|signin
+#   navigation_loading      bool   shows page-transition overlay
+#   chat_request_pending    bool   suppresses nav overlay during chat turns
+#
+# Conversation
+#   messages                list   current conversation message dicts
+#   next_target             str    Rhet's last suggested sentence (pronunciation reference)
+#   conversation_id         str    UUID of the current conversation
+#   pending_history_restore dict   conversation to restore on next render
+#
+# History / persistence
+#   chat_history            list   saved conversations (loaded from Cosmos / localStorage)
+#   history_loaded          bool   guards one-time localStorage read
+#   cosmos_user_data_loaded bool   guards one-time Cosmos profile/conversations load
+#
+# Services
+#   orchestrator            MasterOrchestrator
+#   foundry_agent           FoundryAgentClient  (lazy-init)
+#   cosmos                  CosmosService       (may be None if not configured)
+#
+# Account / auth
+#   user_account            dict   signed-in user (None when logged out)
+#   account_storage_record  dict   last record read from localStorage (may be unauthenticated)
+#   account_loaded          bool   guards one-time localStorage account read
+#   settings_loaded         bool   guards one-time localStorage settings read
+#   google_login_processed  bool   prevents duplicate Google OAuth sign-in on reruns
+#   google_login_pending    bool   set True when user clicks "Continue with Google"; cleared on callback
+#   _pending_otp            dict   in-flight OTP: {email, code, expires_at, purpose}
+#
+# OTP flow flags (sign-in)
+#   signin_otp_sent         bool   True while waiting for the user to enter the code
+#   signin_pending_email    str    email waiting for OTP verification
+#
+# OTP flow flags (sign-up)
+#   signup_otp_sent         bool   True while waiting for the user to enter the code
+#   signup_pending_name     str    name pending OTP verification
+#   signup_pending_email    str    email pending OTP verification
+#
+# User settings (synced to Cosmos on sign-in)
+#   native_language         str    e.g. "English"
+#   target_language         str    e.g. "Spanish"
+#   proficiency_level       str    CEFR level e.g. "A1"
+#   daily_goal              int    minutes per day
+#   session_length          str    e.g. "10 minutes"
+#   correction_style        str    "Gentle" | "Balanced" | "Detailed"
+#   show_translations       bool
+#   pronunciation_feedback  bool
+#   auto_play_audio         bool
+#
+# Progress
+#   user_progress           dict   latest progress document from Cosmos
+#   progress_session_counted bool  ensures one session is counted per conversation
+#
+# Internal / temporary
+#   storage_load_retried    bool   one-time retry flag for localStorage.getAll()
+#   _orchestrator_error     str    error message if orchestrator failed to init
+#   _cosmos_error           str    error message if Cosmos failed to init
+# ============================================================
 
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = str(uuid.uuid4())
@@ -551,22 +619,7 @@ def generate_pronunciation_audio(text, language):
     if not text or not text.strip():
         return None
 
-    # Convert language name to Azure Speech locale.
-    speech_language_codes = {
-        "Spanish": "es-ES",
-        "English": "en-US",
-        "French": "fr-FR",
-        "German": "de-DE",
-        "Japanese": "ja-JP",
-        "Hindi": "hi-IN",
-    }
-
-    speech_language = speech_language_codes.get(
-        language,
-        "en-US"
-    )
-
-    import tempfile
+    speech_language = SPEECH_LANGUAGE_CODES.get(language, "en-US")
 
     temp_fd, temp_path = tempfile.mkstemp(
         suffix=".wav"
@@ -594,6 +647,18 @@ def generate_pronunciation_audio(text, language):
 
 ACCOUNT_KEY = "rhet_user_account"
 SETTINGS_KEY = "rhet_user_settings"
+
+# Mapping from UI language name → Azure Speech locale.
+# Single source of truth — used by generate_pronunciation_audio,
+# text-mode turns, and voice turns.
+SPEECH_LANGUAGE_CODES: dict = {
+    "Spanish":  "es-ES",
+    "English":  "en-US",
+    "French":   "fr-FR",
+    "German":   "de-DE",
+    "Japanese": "ja-JP",
+    "Hindi":    "hi-IN",
+}
 
 if "user_account" not in st.session_state:
     st.session_state.user_account = None
@@ -696,9 +761,10 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
             except Exception:
                 pass
         if stored_account:
-            # Accounts created before the sign-in flow did not have an
-            # authenticated flag; treat those as signed in for compatibility.
-            authenticated = stored_account.get("authenticated", True)
+            # Only restore the session if the account is explicitly marked
+            # authenticated. Default to False (not True) so that sign-out
+            # always requires a fresh sign-in — even after a page refresh.
+            authenticated = stored_account.get("authenticated", False)
             st.session_state.user_account = stored_account if authenticated else None
 
         st.session_state.account_loaded = True
@@ -823,6 +889,22 @@ if "account_loaded" not in st.session_state or "settings_loaded" not in st.sessi
                 pass
         st.session_state.settings_loaded = True
 
+
+# ============================================================
+# VALIDATION HELPERS
+# ============================================================
+
+def _valid_email(email: str) -> bool:
+    """Return True if email is a non-empty string containing exactly one '@'."""
+    email = email.strip()
+    return bool(email) and email.count("@") == 1
+
+
+def _valid_name(name: str) -> bool:
+    """Return True if name is a non-empty string with at least 2 characters."""
+    return len(name.strip()) >= 2
+
+
 def save_user_account(account):
     """Save the local account and persist signed-in state in one localStorage item."""
     record = dict(account)
@@ -849,6 +931,7 @@ def save_user_account(account):
     # SAVE USER PROFILE TO COSMOS
     # ========================================================
 
+    cosmos_saved = False
     if st.session_state.cosmos:
         try:
             user_document = {
@@ -900,9 +983,13 @@ def save_user_account(account):
             }
 
             st.session_state.cosmos.save_user(user_document)
+            cosmos_saved = True
 
         except Exception as e:
-            rhet_log.error("save_user_account Cosmos user save failed: %s", e, exc_info=True)
+            rhet_log.error("save_user_account Cosmos save failed: %s", e, exc_info=True)
+            # Don't block local sign-in if cloud sync fails — log and continue
+    else:
+        rhet_log.warning("save_user_account called but cosmos service unavailable")
 
     # ========================================================
     # SAVE LOCAL ACCOUNT
@@ -914,36 +1001,106 @@ def save_user_account(account):
             json.dumps(record, ensure_ascii=False)
         )
         time.sleep(0.45)
+
+        # Warn user if local worked but cloud failed
+        if not cosmos_saved and st.session_state.cosmos:
+            st.warning(
+                "Account saved locally, but cloud sync failed. "
+                "Your conversations may not persist across devices."
+            )
+
         return True
 
     except Exception as e:
         rhet_log.error("save_user_account localStorage save failed: %s", e, exc_info=True)
         return False
 
-def sign_in_user(email):
-    """Sign in by retrieving the user account from Cosmos DB."""
+def request_signin_otp(email: str) -> tuple:
+    """
+    Step 1 of email sign-in.
 
+    Generates an OTP, stores it in session state (short-lived, no Cosmos needed),
+    and emails it to the user.
+
+    Returns (success: bool, message: str)
+    """
     email = email.strip().lower()
 
-    if not email:
-        return False, "Please enter your email."
+    if not email or "@" not in email:
+        return False, "Please enter a valid email address."
 
     if not st.session_state.cosmos:
         reason = st.session_state.get("_cosmos_error", "COSMOS_ENDPOINT is not set in .env")
         return False, f"Cosmos DB is not available ({reason}). Add your credentials to .env and restart."
 
     try:
-        # Find the real account in Cosmos
         cosmos_user = st.session_state.cosmos.get_user_by_email(email)
+        if not cosmos_user:
+            return False, "No account found with that email."
 
+        code = generate_otp()
+        expires = otp_expiry().isoformat()
+        user_name = cosmos_user.get("name", "")
+
+        # Store OTP in session state — no Cosmos partition key issues
+        st.session_state._pending_otp = {
+            "email": email,
+            "code": code,
+            "expires_at": expires,
+            "purpose": "signin",
+        }
+
+        ok, err = send_otp_email(email, code, user_name)
+        if not ok:
+            return False, f"Could not send verification email: {err}"
+
+        return True, ""
+
+    except Exception as exc:
+        rhet_log.error("request_signin_otp failed: %s", exc, exc_info=True)
+        return False, f"Sign-in error: {exc}"
+
+
+def verify_signin_otp(email: str, entered_code: str) -> tuple:
+    """
+    Step 2 of email sign-in.
+
+    Validates the OTP from session state, then completes sign-in.
+
+    Returns (success: bool, message: str)
+    """
+    email = email.strip().lower()
+
+    pending = st.session_state.get("_pending_otp")
+
+    if not pending or pending.get("email") != email or pending.get("purpose") != "signin":
+        return False, "No pending verification code. Please request a new one."
+
+    valid, reason = verify_otp(
+        entered_code,
+        pending.get("code", ""),
+        pending.get("expires_at", ""),
+    )
+    if not valid:
+        return False, reason
+
+    # Consumed — clear it
+    st.session_state._pending_otp = None
+
+    return _complete_email_signin(email)
+
+
+def _complete_email_signin(email: str) -> tuple:
+    """Internal: load the Cosmos user and populate session state."""
+    try:
+        cosmos_user = st.session_state.cosmos.get_user_by_email(email)
         if not cosmos_user:
             return False, "No account exists with this email."
 
-        # IMPORTANT:
         # Use the user_id stored in Cosmos, NOT a browser-generated ID.
         record = {
             "id": cosmos_user["id"],
-            "user_id": cosmos_user["user_id"],
+            "user_id": cosmos_user.get("user_id") or cosmos_user["id"],
             "name": cosmos_user.get("name", ""),
             "email": cosmos_user.get("email", ""),
             "created_at": cosmos_user.get("created_at"),
@@ -954,15 +1111,19 @@ def sign_in_user(email):
         st.session_state.user_account = record
         st.session_state.account_storage_record = record
 
+        # Persist to localStorage immediately so the authenticated flag is stored
+        try:
+            local_storage.setItem(
+                ACCOUNT_KEY,
+                json.dumps(record, ensure_ascii=False)
+            )
+        except Exception as _e:
+            rhet_log.warning("_complete_email_signin localStorage save failed: %s", _e)
+
         # Force Cosmos data to reload for this user
-        st.session_state.pop(
-            "cosmos_user_data_loaded",
-            None
-        )
+        st.session_state.pop("cosmos_user_data_loaded", None)
 
         # Clear stale browser/session conversation state.
-        # Also clear localStorage so the previous account's conversations
-        # don't reappear on the next browser refresh before Cosmos loads.
         st.session_state.chat_history = []
         st.session_state.messages = []
         st.session_state.pending_history_restore = None
@@ -975,8 +1136,7 @@ def sign_in_user(email):
         except Exception:
             pass
 
-        # Immediately load this user's conversations from Cosmos
-        # so the sidebar populates before the next rerun.
+        # Pre-load this user's conversations so the sidebar is populated.
         if st.session_state.cosmos:
             try:
                 convos = st.session_state.cosmos.get_user_conversations(
@@ -993,25 +1153,165 @@ def sign_in_user(email):
 
         return True, ""
 
+    except Exception as exc:
+        rhet_log.error("_complete_email_signin failed: %s", exc, exc_info=True)
+        return False, f"Could not sign in: {exc}"
+
+
+def save_user_settings():
+    """
+    Persist the current learning settings to localStorage and Cosmos DB.
+    Called by the Settings page after the user clicks Save.
+    """
+    settings = {
+        "native_language":       st.session_state.get("native_language", "English"),
+        "target_language":       st.session_state.get("target_language", "Spanish"),
+        "proficiency_level":     st.session_state.get("proficiency_level", "A1"),
+        "daily_goal":            st.session_state.get("daily_goal", 10),
+        "session_length":        st.session_state.get("session_length", "10 minutes"),
+        "correction_style":      st.session_state.get("correction_style", "Balanced"),
+        "show_translations":     st.session_state.get("show_translations", True),
+        "pronunciation_feedback":st.session_state.get("pronunciation_feedback", True),
+        "auto_play_audio":       st.session_state.get("auto_play_audio", True),
+    }
+
+    # Persist to localStorage
+    try:
+        local_storage.setItem(SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
     except Exception as e:
-        return False, f"Could not sign in: {e}"
-    
+        rhet_log.error("save_user_settings localStorage save failed: %s", e, exc_info=True)
+
+    # Sync to Cosmos if signed in
+    if st.session_state.cosmos and st.session_state.get("user_account"):
+        user_id = (st.session_state.user_account or {}).get("user_id")
+        if user_id:
+            try:
+                cosmos_user = st.session_state.cosmos.get_user(user_id)
+                if cosmos_user:
+                    cosmos_user.update(settings)
+                    st.session_state.cosmos.save_user(cosmos_user)
+            except Exception as e:
+                rhet_log.error("save_user_settings Cosmos sync failed: %s", e, exc_info=True)
+
+
+def sign_in_with_google_user(email: str, name: str, google_sub: str) -> tuple:
+    """
+    Complete sign-in/sign-up after Streamlit's built-in OAuth succeeds.
+
+    Called with the values from st.user (email, name, sub) once
+    Google has authenticated the user.  No token verification needed
+    here — Streamlit already handled that via secrets.toml.
+
+    Returns (success: bool, message: str)
+    """
+    if not st.session_state.cosmos:
+        return False, "Cosmos DB is not available."
+
+    try:
+        cosmos_user = None
+
+        # 1. Try matching by google_sub (fastest)
+        if google_sub:
+            cosmos_user = st.session_state.cosmos.get_user_by_google_id(google_sub)
+
+        # 2. Fall back to email
+        if not cosmos_user and email:
+            cosmos_user = st.session_state.cosmos.get_user_by_email(email)
+
+        if cosmos_user:
+            # Backfill google_id if this is their first Google login
+            if google_sub and not cosmos_user.get("google_id"):
+                cosmos_user["google_id"] = google_sub
+                st.session_state.cosmos.save_user(cosmos_user)
+        else:
+            # First-time Google user — auto-create account
+            new_id = str(uuid.uuid4())
+            cosmos_user = {
+                "id": new_id,
+                "user_id": new_id,
+                "name": name,
+                "email": email,
+                "google_id": google_sub,
+                "email_verified": True,
+                "created_at": datetime.now().isoformat(),
+                "native_language": "English",
+                "target_language": "Spanish",
+                "proficiency_level": "A1",
+            }
+            st.session_state.cosmos.save_user(cosmos_user)
+
+        return _complete_email_signin(email)
+
+    except Exception as exc:
+        rhet_log.error("sign_in_with_google_user failed: %s", exc, exc_info=True)
+        return False, f"Google sign-in error: {exc}"
+
+
+def _handle_google_callback() -> bool:
+    """
+    Called on both the sign-in and sign-up pages after st.login() completes.
+
+    Returns True (and navigates to home) when the Google OAuth callback is
+    successfully processed.  Returns False when the callback should not fire
+    yet (no pending login, already signed in, already processed).
+    """
+    if not (
+        st.user.is_logged_in
+        and st.session_state.get("google_login_pending")
+        and not st.session_state.get("user_account")
+        and not st.session_state.get("google_login_processed")
+    ):
+        return False
+
+    google_email = st.user.get("email", "")
+    google_name  = st.user.get("name", "")
+    google_sub   = st.user.get("sub", "")
+
+    if not google_email:
+        return False
+
+    ok, msg = sign_in_with_google_user(google_email, google_name, google_sub)
+    if ok:
+        st.session_state.google_login_pending   = False
+        st.session_state.google_login_processed = True
+        navigate_to("home")
+        st.rerun()
+    else:
+        st.error(msg)
+        st.session_state.google_login_pending   = False
+        st.session_state.google_login_processed = False
+        st.logout()
+
+    return True
+
+
 def sign_out_user():
-    """Sign out without deleting the locally stored account."""
-    stored = st.session_state.get("account_storage_record") or {}
-    if stored:
-        record = dict(stored)
-        record["authenticated"] = False
+    """Sign out completely — clears both the Parrhet session and the Google OAuth cookie."""
+    # Clear the Google session processed flag so the next login is never skipped (allows switching accounts)
+    st.session_state.google_login_processed = False
+    st.session_state.google_login_pending = False
+    
+    # Immediately clear the active session
+    st.session_state.user_account = None
+    st.session_state.account_storage_record = None
+    
+    # Also clear localStorage — write authenticated=False as a fallback
+    # in case the removeItem fails, and attempt to remove entirely
+    try:
+        local_storage.removeItem(ACCOUNT_KEY)
+    except Exception:
+        # Fallback: write authenticated=False
         try:
             local_storage.setItem(
                 ACCOUNT_KEY,
-                json.dumps(record, ensure_ascii=False)
+                json.dumps({"authenticated": False}, ensure_ascii=False)
             )
-            time.sleep(0.3)
-            st.session_state.account_storage_record = record
         except Exception as e:
-            rhet_log.error("sign_out_user localStorage save failed: %s", e, exc_info=True)
-    st.session_state.user_account = None
+            rhet_log.error("sign_out_user localStorage clear failed: %s", e, exc_info=True)
+
+    # Also clear Streamlit's own OAuth session so Google doesn't auto-restore
+    if st.user.is_logged_in:
+        st.logout()
 
 
 def clear_user_account():
@@ -1025,16 +1325,6 @@ def clear_user_account():
             local_storage.setItem(ACCOUNT_KEY, json.dumps({}))
         except Exception as e:
             rhet_log.error("clear_user_account localStorage clear failed: %s", e, exc_info=True)
-
-
-def get_user_display_name():
-    account = st.session_state.get("user_account") or {}
-    return account.get("name") or "Learner"
-
-
-def get_user_email():
-    account = st.session_state.get("user_account") or {}
-    return account.get("email") or ""
 
 # ============================================================
 # FONTS & STYLESHEET — CREAM + OLIVE EDITORIAL
@@ -2285,9 +2575,7 @@ if st.session_state.pending_history_restore is not None:
 # AUTHENTICATION GATE — CHAT REQUIRES A LOCAL ACCOUNT
 # ============================================================
 if st.session_state.page == "chat" and not st.session_state.user_account:
-    st.session_state.page = (
-        "signin" if st.session_state.get("account_storage_record") else "signup"
-    )
+    st.session_state.page = "signin"
 
 # ============================================================
 # SIDEBAR (EXISTING FRONTEND + FUNCTIONAL ACCOUNT NAVIGATION)
@@ -2643,35 +2931,114 @@ elif st.session_state.page == "signin":
         """<div class="olive-band">
           <div class="olive-band-text">
             <div class="olive-band-title">Sign back in to parrhet.ai.</div>
-            <div class="olive-band-sub">Your local account is stored in this browser. Sign in with the same email you used when creating it.</div>
+            <div class="olive-band-sub">Enter your email to receive a verification code, or continue with Google.</div>
           </div>
           <div class="olive-band-lang">🦜</div>
         </div>""",
         unsafe_allow_html=True
     )
 
-    with st.form("signin_form", clear_on_submit=False):
-        signin_email = st.text_input(
-            "Email",
-            value="",
-            placeholder="you@example.com"
-        )
-        signin_submit = st.form_submit_button(
-            "Sign in",
-            use_container_width=True
+    # ── Session-state flags that drive the two-step OTP flow ──────────
+    if "signin_otp_sent" not in st.session_state:
+        st.session_state.signin_otp_sent = False
+    if "signin_pending_email" not in st.session_state:
+        st.session_state.signin_pending_email = ""
+
+    # ── Google Sign-In (uses Streamlit's built-in OAuth) ──────────────
+    _handle_google_callback()
+
+    if not st.session_state.signin_otp_sent:
+        # ── STEP 1: collect email ──────────────────────────────────────
+        with st.form("signin_form", clear_on_submit=False):
+            signin_email = st.text_input(
+                "Email",
+                value="",
+                placeholder="you@example.com"
+            )
+            signin_submit = st.form_submit_button(
+                "Send verification code",
+                use_container_width=True
+            )
+
+        if signin_submit:
+            clean_email = signin_email.strip()
+            if not _valid_email(clean_email):
+                st.error("Please enter a valid email address.")
+            else:
+                with st.spinner("Sending verification code…"):
+                    ok, message = request_signin_otp(clean_email)
+                if ok:
+                    st.session_state.signin_otp_sent = True
+                    st.session_state.signin_pending_email = clean_email
+                    st.rerun()
+                else:
+                    st.error(message)
+
+        st.caption("— or —")
+
+        def _start_google_signin():
+            st.session_state.google_login_processed = False
+            st.session_state.google_login_pending = True
+            st.login()
+
+        st.button(
+            "Continue with Google",
+            use_container_width=True,
+            key="signin_google_btn",
+            on_click=_start_google_signin
         )
 
-    if signin_submit:
-        clean_email = signin_email.strip()
-        if not clean_email or "@" not in clean_email:
-            st.error("Please enter the email used for this local account.")
-        else:
-            ok, message = sign_in_user(clean_email)
+    else:
+        # ── STEP 2: verify OTP ────────────────────────────────────────
+        pending_email = st.session_state.signin_pending_email
+        st.info(f"A 6-digit code was sent to **{pending_email}**. Check your inbox.")
+
+        with st.form("signin_otp_form", clear_on_submit=False):
+            otp_input = st.text_input(
+                "Verification code",
+                value="",
+                placeholder="123456",
+                max_chars=6
+            )
+            otp_submit = st.form_submit_button(
+                "Verify and sign in",
+                use_container_width=True
+            )
+
+        if otp_submit:
+            entered = otp_input.strip()
+            if not entered or len(entered) != 6 or not entered.isdigit():
+                st.error("Please enter the 6-digit code from your email.")
+            else:
+                with st.spinner("Verifying code…"):
+                    ok, message = verify_signin_otp(pending_email, entered)
+                if ok:
+                    st.session_state.signin_otp_sent = False
+                    st.session_state.signin_pending_email = ""
+                    navigate_to("home")
+                    st.rerun()
+                else:
+                    st.error(message)
+
+        if st.button(
+            "Resend code",
+            use_container_width=True,
+            key="signin_resend"
+        ):
+            with st.spinner("Resending…"):
+                ok, message = request_signin_otp(pending_email)
             if ok:
-                navigate_to("home")
-                st.rerun()
+                st.success("A new code has been sent.")
             else:
                 st.error(message)
+        if st.button(
+            "Use a different email",
+            use_container_width=True,
+            key="signin_change_email"
+        ):
+            st.session_state.signin_otp_sent = False
+            st.session_state.signin_pending_email = ""
+            st.rerun()
 
     if st.session_state.get("account_storage_record"):
         if st.button("Create a different local account", use_container_width=True, key="signin_signup"):
@@ -2693,44 +3060,185 @@ elif st.session_state.page == "signup":
 
     # ── SIGNUP PAGE ─────────────────────────────────────────────────────
     st.markdown('<div class="dash-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="dash-section-title">Create your local account</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dash-section-title">Create your account</div>', unsafe_allow_html=True)
 
     st.markdown(
         """<div class="olive-band">
           <div class="olive-band-text">
             <div class="olive-band-title">Welcome to parrhet.ai.</div>
-            <div class="olive-band-sub">Create your learner profile. For now, the information stays in this browser's local storage.</div>
+            <div class="olive-band-sub">Create your learner profile. We'll send a verification code to confirm your email.</div>
           </div>
           <div class="olive-band-lang">🦜</div>
         </div>""",
         unsafe_allow_html=True
     )
 
-    with st.form("signup_form", clear_on_submit=False):
-        signup_name = st.text_input("Full name", value="", placeholder="Your name")
-        signup_email = st.text_input("Email", value="", placeholder="you@example.com")
-        st.caption("You can choose your languages and learning preferences later in Settings.")
-        signup_submit = st.form_submit_button("Create account", use_container_width=True)
+    # ── Session-state flags for the two-step sign-up OTP flow ─────────
+    if "signup_otp_sent" not in st.session_state:
+        st.session_state.signup_otp_sent = False
+    if "signup_pending_name" not in st.session_state:
+        st.session_state.signup_pending_name = ""
+    if "signup_pending_email" not in st.session_state:
+        st.session_state.signup_pending_email = ""
 
-    if signup_submit:
-        clean_name = signup_name.strip()
-        clean_email = signup_email.strip()
+    # ── Google Sign-Up (same flow as sign-in — account auto-created) ──
+    # If returning from Google OAuth, finish the account setup here too
+    _handle_google_callback()
 
-        if not clean_name:
-            st.error("Please enter your name.")
-        elif not clean_email or "@" not in clean_email:
-            st.error("Please enter a valid email address.")
-        else:
-            account = {
-                "id": str(uuid.uuid4()),
-                "name": clean_name,
-                "email": clean_email,
-                "created_at": datetime.now().isoformat(),
+    st.caption("— or sign up with Google —")
+
+    def _start_google_signup():
+        st.session_state.google_login_processed = False
+        st.session_state.google_login_pending = True
+        st.login()
+
+    st.button(
+        "Continue with Google",
+        use_container_width=True,
+        key="signup_google_btn",
+        on_click=_start_google_signup
+    )
+
+    st.caption("— or register with email —")
+
+    if not st.session_state.signup_otp_sent:
+        # ── STEP 1: collect name + email, send OTP ────────────────────
+        with st.form("signup_form", clear_on_submit=False):
+            signup_name = st.text_input("Full name", value="", placeholder="Your name")
+            signup_email = st.text_input("Email", value="", placeholder="you@example.com")
+            st.caption("You can choose your languages and learning preferences later in Settings.")
+            signup_submit = st.form_submit_button("Send verification code", use_container_width=True)
+
+        if signup_submit:
+            clean_name = signup_name.strip()
+            clean_email = signup_email.strip().lower()
+
+            if not _valid_name(clean_name):
+                st.error("Please enter your full name (at least 2 characters).")
+            elif not _valid_email(clean_email):
+                st.error("Please enter a valid email address.")
+            else:
+                # Make sure this email isn't already registered
+                if st.session_state.cosmos:
+                    existing = st.session_state.cosmos.get_user_by_email(clean_email)
+                    if existing:
+                        st.error(
+                            "An account already exists with that email. "
+                            "Head to Sign in instead."
+                        )
+                        st.stop()
+
+                code = generate_otp()
+                expires = otp_expiry().isoformat()
+
+                # Store OTP in session state — avoids Cosmos partition key issues
+                st.session_state._pending_otp = {
+                    "email": clean_email,
+                    "code": code,
+                    "expires_at": expires,
+                    "purpose": "verify",
+                }
+
+                with st.spinner("Sending verification code…"):
+                    ok, err = send_otp_email(clean_email, code, clean_name)
+
+                if not ok:
+                    st.session_state._pending_otp = None
+                    st.error(f"Could not send verification email: {err}")
+                else:
+                    st.session_state.signup_otp_sent = True
+                    st.session_state.signup_pending_name = clean_name
+                    st.session_state.signup_pending_email = clean_email
+                    st.rerun()
+
+    else:
+        # ── STEP 2: verify OTP, then create account ───────────────────
+        pending_email = st.session_state.signup_pending_email
+        pending_name = st.session_state.signup_pending_name
+        st.info(f"A 6-digit code was sent to **{pending_email}**. Check your inbox.")
+
+        with st.form("signup_otp_form", clear_on_submit=False):
+            otp_input = st.text_input(
+                "Verification code",
+                value="",
+                placeholder="123456",
+                max_chars=6
+            )
+            otp_submit = st.form_submit_button(
+                "Verify and create account",
+                use_container_width=True
+            )
+
+        if otp_submit:
+            entered = otp_input.strip()
+            if not entered or len(entered) != 6 or not entered.isdigit():
+                st.error("Please enter the 6-digit code from your email.")
+            else:
+                otp_record = st.session_state.get("_pending_otp")
+
+                if (
+                    not otp_record
+                    or otp_record.get("email") != pending_email
+                    or otp_record.get("purpose") != "verify"
+                ):
+                    st.error("No pending code found. Please request a new one.")
+                else:
+                    valid, reason = verify_otp(
+                        entered,
+                        otp_record.get("code", ""),
+                        otp_record.get("expires_at", ""),
+                    )
+                    if not valid:
+                        st.error(reason)
+                    else:
+                        # OTP confirmed — clear it and create account
+                        st.session_state._pending_otp = None
+
+                        account = {
+                            "id": str(uuid.uuid4()),
+                            "name": pending_name,
+                            "email": pending_email,
+                            "created_at": datetime.now().isoformat(),
+                            "email_verified": True,
+                        }
+
+                        st.session_state.signup_otp_sent = False
+                        st.session_state.signup_pending_name = ""
+                        st.session_state.signup_pending_email = ""
+
+                        if save_user_account(account):
+                            navigate_to("profile")
+                            st.rerun()
+
+        if st.button(
+            "Resend code",
+            use_container_width=True,
+            key="signup_resend"
+        ):
+            code = generate_otp()
+            expires = otp_expiry().isoformat()
+            st.session_state._pending_otp = {
+                "email": pending_email,
+                "code": code,
+                "expires_at": expires,
+                "purpose": "verify",
             }
+            with st.spinner("Resending…"):
+                ok, err = send_otp_email(pending_email, code, pending_name)
+            if ok:
+                st.success("A new code has been sent.")
+            else:
+                st.error(f"Could not resend code: {err}")
 
-            if save_user_account(account):
-                navigate_to("profile")
-                st.rerun()
+        if st.button(
+            "Use a different email",
+            use_container_width=True,
+            key="signup_change_email"
+        ):
+            st.session_state.signup_otp_sent = False
+            st.session_state.signup_pending_name = ""
+            st.session_state.signup_pending_email = ""
+            st.rerun()
 
     if st.button("Back to home", use_container_width=True, key="signup_home"):
         navigate_to("home")
@@ -2996,17 +3504,7 @@ else:
                 _user_account = st.session_state.get("user_account") or {}
                 _user_id = _user_account.get("user_id") or "anonymous"
 
-                speech_language_codes = {
-                    "Spanish": "es-ES",
-                    "English": "en-US",
-                    "French": "fr-FR",
-                    "German": "de-DE",
-                    "Japanese": "ja-JP",
-                    "Hindi": "hi-IN",
-                }
-                speech_language = speech_language_codes.get(
-                    target_language, "en-US"
-                )
+                speech_language = SPEECH_LANGUAGE_CODES.get(target_language, "en-US")
 
                 text_turn_input = LearnerTurnInput(
                     user_id=_user_id,
@@ -3096,8 +3594,6 @@ else:
 
         elif audio_input is not None:
 
-            import tempfile
-
             temp_fd, temp_path = tempfile.mkstemp(
                 suffix=".wav"
             )
@@ -3111,24 +3607,8 @@ else:
                 with open(temp_path, "wb") as f:
                     f.write(audio_input.getvalue())
 
-                # ------------------------------------------------
                 # UI LANGUAGE → AZURE SPEECH LOCALE
-                # ------------------------------------------------
-                speech_language_codes = {
-                    "Spanish": "es-ES",
-                    "English": "en-US",
-                    "French": "fr-FR",
-                    "German": "de-DE",
-                    "Japanese": "ja-JP",
-                    "Hindi": "hi-IN",
-                }
-
-                speech_language = (
-                    speech_language_codes.get(
-                        target_language,
-                        "en-US"
-                    )
-                )
+                speech_language = SPEECH_LANGUAGE_CODES.get(target_language, "en-US")
 
                 # ------------------------------------------------
                 # PREVIOUS RHET SUGGESTION =
@@ -3175,41 +3655,32 @@ else:
                 # ------------------------------------------------
                 # READ BACKEND RESPONSE
                 # ------------------------------------------------
-                transcript = getattr(
-                    response,
-                    "transcript",
-                    ""
-                )
+                # Guard against failed turns (guardrails block, STT failure, etc.)
+                if not response.success:
+                    err_msg = response.error or response.feedback or "Something went wrong."
+                    rhet_log.warning(
+                        "Voice turn returned success=False (user_id=%s): %s",
+                        _user_id, err_msg
+                    )
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": {
+                            "conversational_reply": err_msg,
+                            "translation": "",
+                            "pedagogical_feedback": "",
+                            "suggested_next_target": "",
+                        }
+                    })
+                    save_current_conversation()
+                    st.session_state.chat_request_pending = False
+                    st.rerun()
 
-                pronunciation_scores = getattr(
-                    response,
-                    "pronunciation_scores",
-                    None
-                )
-
-                feedback = getattr(
-                    response,
-                    "feedback",
-                    ""
-                )
-
-                native_gloss = getattr(
-                    response,
-                    "native_gloss",
-                    ""
-                )
-
-                next_prompt = getattr(
-                    response,
-                    "next_prompt",
-                    ""
-                )
-
-                tutor_audio_path = getattr(
-                    response,
-                    "tutor_audio_path",
-                    None
-                )
+                transcript          = response.transcript or ""
+                pronunciation_scores = response.pronunciation_scores
+                feedback            = response.feedback or ""
+                native_gloss        = response.native_gloss or ""
+                next_prompt         = response.next_prompt or ""
+                tutor_audio_path    = response.tutor_audio_path
 
                 learning_response_text = (next_prompt or "").strip()
                 native_response_text = (native_gloss or "").strip()
@@ -3287,4 +3758,3 @@ else:
         # Re-render exactly once after processing the turn.
         st.session_state.chat_request_pending = False
         st.rerun()
-
